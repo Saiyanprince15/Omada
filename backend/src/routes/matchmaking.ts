@@ -155,7 +155,7 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
     // Atomically claim the event's matchmaking slot. PostgreSQL transaction-level
     // advisory locks serialize concurrent run requests for the same event.
     const round = await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(\${event_id}))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${event_id}))`;
 
       const activeRound = await tx.matchingRound.findFirst({
         where: { eventId: event_id, status: 'running' },
