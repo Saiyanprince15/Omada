@@ -29,27 +29,31 @@ async function launchMatchmaking(eventId: string, weights: MatchWeights = DEFAUL
       });
     }
 
-    const poolSize = await tx.eventParticipant.count({
+    const queued = await tx.eventParticipant.findMany({
       where: { eventId, status: 'in_matchmaking' },
+      select: { userId: true },
+      orderBy: { registeredAt: 'asc' },
     });
 
-    // Avoid proposing a one-person auto-match. There is still no team-size
-    // rule: this is only a queue-start threshold.
-    if (poolSize < 2) return null;
+    // Avoid proposing a one-person auto-match. This is only a queue-start
+    // threshold, not a product-level team-size rule.
+    if (queued.length < 2) return null;
 
-    return tx.matchingRound.create({
+    const round = await tx.matchingRound.create({
       data: {
         eventId,
         status: 'running',
-        participantsCount: poolSize,
+        participantsCount: queued.length,
         algorithmParams: weights as object,
       },
     });
+
+    return { round, participantIds: queued.map((p) => p.userId) };
   });
 
   if (!round) return null;
 
-  runAutoMatch(eventId, round.id, weights)
+  runAutoMatch(eventId, round.round.id, weights, round.participantIds)
     .then(async (result) => {
       const provisionalTeams = await prisma.provisionalTeam.findMany({
         where: { eventId, createdByRound: result.roundId },
@@ -79,6 +83,14 @@ async function launchMatchmaking(eventId: string, weights: MatchWeights = DEFAUL
           data: { round_id: result.roundId, event_id: eventId },
         });
       }
+
+      // Pick up anyone who joined the queue after this round's snapshot.
+      const queuedAfterRound = await prisma.eventParticipant.count({
+        where: { eventId, status: 'in_matchmaking' },
+      });
+      if (queuedAfterRound >= 2) {
+        void launchMatchmaking(eventId);
+      }
     })
     .catch(async (err) => {
       console.error('[matchmaking] Error running auto-match:', err);
@@ -88,7 +100,7 @@ async function launchMatchmaking(eventId: string, weights: MatchWeights = DEFAUL
       }).catch((updateErr) => console.error('[matchmaking] Failed to mark round failed:', updateErr));
     });
 
-  return round;
+  return round.round;
 }
 
 // ─── POST /v1/events/:event_id/matchmaking/enter ──────────────────────────
