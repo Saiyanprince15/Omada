@@ -41,16 +41,17 @@ export function HomePage() {
   const [eventId, setEventId] = useState('');
   const selected = events.data?.data ?? [];
   const active = selected.filter((e) => ['registration_open', 'in_progress'].includes(e.status));
-  return <PageHeader title={`Good to see you, ${user?.displayName.split(' ')[0] ?? 'there'}.`} description="Choose an event, shape your profile, and let Omada handle the team-finding work.">
+  return <>
+    <PageHeader title={`Good to see you, ${user?.displayName.split(' ')[0] ?? 'there'}.`} description="Choose an event, shape your profile, and let Omada handle the team-finding work." />
     <div className="home-grid">
       <section className="hero-panel">
         <div><Badge tone="accent">Omada</Badge><h2>Build a team that fills the gaps.</h2><p>Search people you already know, discover teams looking for your skills, or let auto-match propose a complementary group.</p></div>
         <div className="hero-actions"><Link className="btn btn-primary" to="/events">Explore events</Link><Link className="btn btn-soft" to="/profile">Complete profile</Link></div>
       </section>
       <section className="stats-grid"><Stat label="Active events" value={active.length}/><Stat label="Looking for a team" value={active.reduce((sum,e)=>sum+(e.looking_count ?? 0),0)}/><Stat label="Teams forming" value={active.reduce((sum,e)=>sum+e.team_count,0)}/></section>
-      <section className="surface"><PageHeader title="Your next step" description="Pick an event and jump into discovery." /><div className="inline-form"><select value={eventId} onChange={(e) => setEventId(e.target.value)}><option value="">Select an event</option>{active.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select><Link className={`btn ${eventId ? 'btn-primary' : 'btn-disabled'}`} to={eventId ? `/event/${eventId}` : '#'} onClick={(e)=>!eventId && e.preventDefault()}>Open event</Link></div></section>
+      <section className="surface"><div className="section-heading"><div><h3>Your next step</h3><p>Select an event and jump into discovery.</p></div></div><div className="inline-form"><select value={eventId} onChange={(e) => setEventId(e.target.value)}><option value="">Select an event</option>{active.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select><Link className={`btn ${eventId ? 'btn-primary' : 'btn-disabled'}`} to={eventId ? `/event/${eventId}` : '#'} onClick={(e)=>!eventId && e.preventDefault()}>Open event</Link></div></section>
     </div>
-  </PageHeader>;
+  </>;
 }
 
 function Stat({ label, value }: { label: string; value: number }) { return <div className="stat-card"><span>{label}</span><strong>{value}</strong></div>; }
@@ -63,13 +64,14 @@ export function EventsPage() {
 export function EventPage() {
   const { id = '' } = useParams();
   const event = useAsync(() => api.getEvent(id), [id]);
-  const { user, refreshUser } = useAuth();
+  const { refreshUser } = useAuth();
+  const participation = useAsync(() => api.getParticipation(id), [id]);
   const [action, setAction] = useState('');
   const [error, setError] = useState('');
-  async function act(fn: () => Promise<unknown>) { setAction('working'); setError(''); try { await fn(); await refreshUser(); await event.reload(); } catch(e){setError(e instanceof Error ? e.message : 'Action failed.');} finally {setAction('');} }
+  async function act(fn: () => Promise<unknown>) { setAction('working'); setError(''); try { await fn(); await refreshUser(); await Promise.all([event.reload(), participation.reload()]); } catch(e){setError(e instanceof Error ? e.message : 'Action failed.');} finally {setAction('');} }
   if (event.loading) return <Loading />;
   if (!event.data) return <ErrorBox message={event.error ?? 'Event not found.'}/>;
-  const participantStatus = user?.status;
+  const participantStatus = participation.data?.status;
   return <><PageHeader eyebrow={event.data.eventType.replaceAll('_',' ')} title={event.data.name} description={event.data.description || undefined} action={<Link className="btn btn-soft" to={`/teams?event=${id}`}>Discover teams</Link>}/>
     {error && <div className="alert alert-danger">{error}</div>}
     <div className="two-col"><section className="surface"><div className="metric-row"><Stat label="Participants" value={event.data.participant_count}/><Stat label="Teams" value={event.data.team_count}/><Stat label="Looking" value={event.data.looking_count ?? 0}/></div><div className="section-block"><h3>Your status</h3><Badge tone={participantStatus ? 'accent' : 'neutral'}>{participantStatus ? participantStatus.replaceAll('_',' ') : 'Not registered'}</Badge><div className="action-row">{!participantStatus && event.data.status === 'registration_open' && <Button disabled={!!action} onClick={()=>void act(()=>api.registerForEvent(id))}>Register</Button>}{participantStatus === 'registered' && <Button disabled={!!action} onClick={()=>void act(()=>api.setParticipation(id,'looking_for_team'))}>I’m looking for a team</Button>}{participantStatus === 'looking_for_team' && event.data.matchmakingEnabled && <Button disabled={!!action} onClick={()=>void act(()=>api.enterMatchmaking(id))}>Join auto-match</Button>}{participantStatus === 'in_matchmaking' && <Button variant="ghost" disabled={!!action} onClick={()=>void act(()=>api.leaveMatchmaking(id))}>Leave auto-match</Button>}{['in_forming_team','in_finalized_team'].includes(participantStatus ?? '') && <Link className="btn btn-primary" to={`/teams?event=${id}`}>Open your team</Link>}</div></div></section><section className="surface"><h3>Event focus</h3><div className="chip-column">{event.data.requiredSkills.map((r)=><div className="requirement-row" key={r.skillName}><Badge tone={r.constraintType==='hard'?'danger':'neutral'}>{r.constraintType}</Badge><span>{r.skillName}</span></div>)}{event.data.requiredRoles.map((r)=><div className="requirement-row" key={r.roleName}><Badge tone={r.constraintType==='hard'?'danger':'neutral'}>{r.constraintType}</Badge><span>{r.roleName}</span></div>)}</div></section></div></>;
@@ -105,6 +107,40 @@ export function TeamPage() {
   if(!team.data)return <ErrorBox message={team.error??'Team not found.'}/>;
   const isOwner=team.data.owner.id===user?.id;
   return <><PageHeader eyebrow="Team workspace" title={team.data.name} description={team.data.projectIdea || team.data.description || undefined} action={<Link className="btn btn-soft" to={`/teams?event=${eventId}`}>Back to discovery</Link>}/>{error&&<div className="alert alert-danger">{error}</div>}<div className="two-col"><section className="surface"><div className="section-heading"><div><h3>Members</h3><p>{team.data.current_size} active member{team.data.current_size===1?'':'s'}</p></div><Badge tone={team.data.status==='forming'?'warn':'good'}>{team.data.status}</Badge></div><div className="member-list">{team.data.members.map(m=><div className="member-row" key={m.id}><Avatar user={m.user}/><div><strong>{m.user.displayName}</strong><small>{m.roleInTeam}{m.user.preferredRoles[0] ? ` · ${m.user.preferredRoles[0].roleDisplay}` : ''}</small></div><div className="chip-row">{m.user.skills.slice(0,2).map(s=><Badge key={s.skillName}>{s.skillDisplay}</Badge>)}</div></div>)}</div></section><section className="surface"><h3>Team actions</h3><div className="action-grid">{team.data.chatRoomId&&<Link className="btn btn-soft" to={`/chat/${team.data.chatRoomId}?team=${teamId}&event=${eventId}`}>Open chat</Link>}{team.data.status==='forming'&&user?.status==='looking_for_team'&&<Button disabled={busy} onClick={()=>void action(()=>api.sendRequest(eventId,{type:'join_request',team_id:teamId,message:'I’d like to join your team.'}))}>Request to join</Button>}{isOwner&&team.data.status==='forming'&&<><Button variant="soft" onClick={()=>void loadCandidates()}>Find candidates</Button><Button disabled={busy} onClick={()=>void action(()=>api.finalizeTeam(eventId,teamId))}>Finalize team</Button><Button variant="danger" disabled={busy} onClick={()=>void action(()=>api.dissolveTeam(eventId,teamId))}>Dissolve</Button></>}{user?.id&&team.data.members.some(m=>m.userId===user.id)&&team.data.status==='forming'&&<Button variant="ghost" disabled={busy} onClick={()=>void action(()=>api.leaveTeam(eventId,teamId))}>Leave team</Button>}</div></section></div>{candidateData.length>0&&<section className="surface section-margin"><div className="section-heading"><div><h3>Candidate search</h3><p>Ranked against your current team composition.</p></div></div><div className="card-grid">{candidateData.map(c=><UserCard key={c.user.id} user={c.user} extra={<div className="candidate-footer"><span>Score {(c.overallScore*100).toFixed(0)}%</span><Button variant="soft" onClick={()=>void api.sendRequest(eventId,{type:'team_invite',team_id:teamId,recipient_id:c.user.id,message:`We think you could complement ${team.data.name}.`})}>Invite</Button></div>}/>)}</div></section>}</>;
+}
+
+export function ProvisionalPage() {
+  const { eventId = '', provisionalId = '' } = useParams();
+  const pt = useAsync(() => api.getProvisional(eventId, provisionalId), [eventId, provisionalId]);
+  const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function respond(action: 'accept' | 'reject') {
+    setBusy(true); setError('');
+    try {
+      const result = await api.respondProvisional(eventId, provisionalId, action);
+      if (result.team_id) navigate(`/team/${eventId}/${result.team_id}`, { replace: true });
+      else await pt.reload();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not respond.'); }
+    finally { setBusy(false); }
+  }
+  if (pt.loading) return <Loading />;
+  if (!pt.data) return <ErrorBox message={pt.error ?? 'Match proposal not found.'} />;
+  return <>
+    <PageHeader eyebrow="Auto-match proposal" title="A team for you" description="Review the people, the match reasoning, and decide whether this group is right for you." />
+    {error && <div className="alert alert-danger">{error}</div>}
+    <div className="two-col">
+      <section className="surface">
+        <div className="section-heading"><div><h3>Match quality</h3><p>Score is a model signal, not a requirement to accept.</p></div><Badge tone="accent">{Math.round(Number(pt.data.matchScore ?? 0) * 100)}%</Badge></div>
+        <div className="member-list">{pt.data.members.map((m)=><div className="member-row" key={m.id}><Avatar user={m.user}/><div><strong>{m.user.displayName}</strong><small>{m.status} {m.user.preferredRoles[0] ? ` · ${m.user.preferredRoles[0].roleDisplay}` : ''}</small></div><div className="chip-row">{m.user.skills.slice(0,3).map(s=><Badge key={s.skillName}>{s.skillDisplay}</Badge>)}</div></div>)}</div>
+      </section>
+      <section className="surface">
+        <h3>Why this team?</h3>
+        <p className="muted">Omada uses complementary skills, role coverage, experience balance, interests, and role preferences to score the proposal.</p>
+        <div className="action-grid"><Button disabled={busy} onClick={()=>void respond('accept')}>Accept proposal</Button><Button variant="danger" disabled={busy} onClick={()=>void respond('reject')}>Decline & find replacement</Button></div>
+      </section>
+    </div>
+  </>;
 }
 
 export function ProfilePage() {
