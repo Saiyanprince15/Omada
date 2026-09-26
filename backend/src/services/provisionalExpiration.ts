@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma';
+import { sendBulkNotifications } from './notificationService';
 
 export async function expireProvisionalTeams(now = new Date()): Promise<number> {
   const expiredTeams = await prisma.provisionalTeam.findMany({
@@ -72,6 +73,17 @@ export async function expireProvisionalTeams(now = new Date()): Promise<number> 
 
     if (result) {
       expiredCount++;
+
+      await sendBulkNotifications(
+        result.userIds.map((userId) => ({
+          userId,
+          eventId: result.eventId,
+          type: 'provisional_dissolved' as const,
+          title: 'Your auto-match expired',
+          body: 'The provisional team timed out. You are back in the discovery pool.',
+          data: { event_id: result.eventId },
+        }))
+      );
     }
   }
 
