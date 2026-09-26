@@ -184,46 +184,37 @@ router.post(
                 return { candidate, score };
               }).sort((a, b) => b.score - a.score || a.candidate.registeredAt.getTime() - b.candidate.registeredAt.getTime());
 
-              const replacement = scored[0]?.candidate ?? null;
-
-              if (replacement) {
+              for (const scoredCandidate of scored) {
                 // Atomically claim the candidate. Another provisional team may
-                // have selected the same person between discovery and this
-                // transaction; only one transaction is allowed to move them
-                // out of the looking-for-team pool.
+                // have claimed this person after discovery; move to the next
+                // ranked candidate instead of giving up the replacement round.
                 const claimed = await tx.eventParticipant.updateMany({
                   where: {
                     eventId: event_id,
-                    userId: replacement.userId,
+                    userId: scoredCandidate.candidate.userId,
                     status: 'looking_for_team',
                   },
                   data: {
                     status: 'in_provisional_team',
                     provisionalTeamId: pt_id,
                     profileSnapshot: {
-                      skills: replacement.user.skills,
-                      interests: replacement.user.interests,
-                      preferredRoles: replacement.user.preferredRoles,
+                      skills: scoredCandidate.candidate.user.skills,
+                      interests: scoredCandidate.candidate.user.interests,
+                      preferredRoles: scoredCandidate.candidate.user.preferredRoles,
                     } as object,
                   },
                 });
 
-                if (claimed.count !== 1) {
-                  return {
-                    replacementUserId: null,
-                    remainingUserIds: remaining.map((m) => m.userId),
-                    dissolved: false,
-                  };
-                }
+                if (claimed.count !== 1) continue;
 
                 const replacementMember = await tx.provisionalTeamMember.create({
                   data: {
                     provisionalTeamId: pt_id,
-                    userId: replacement.userId,
+                    userId: scoredCandidate.candidate.userId,
                     status: 'pending',
                     matchReason: {
                       replacement: true,
-                      score: scored[0]!.score,
+                      score: scoredCandidate.score,
                       reason: 'Selected from the current discovery pool to replace a declined member.',
                     },
                   },
@@ -235,7 +226,6 @@ router.post(
                   dissolved: false,
                 };
               }
-
               return {
                 replacementUserId: null,
                 remainingUserIds: remaining.map((m) => m.userId),
