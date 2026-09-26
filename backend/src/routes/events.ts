@@ -5,6 +5,7 @@ import { validate, createEventSchema, updateParticipationSchema } from '../lib/v
 import { AppError } from '../middleware/errorHandler';
 import { sendNotification } from '../services/notificationService';
 import { normalizeRole, normalizeSkill } from '../lib/normalize';
+import { assertEventIsActive, assertEventRegistrationOpen } from '../lib/eventLifecycle';
 
 const router = Router();
 
@@ -127,9 +128,7 @@ router.post('/:id/register', authenticate, async (req: Request, res: Response, n
   try {
     const event = await prisma.event.findUnique({ where: { id: req.params.id } });
     if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
-    if (event.status !== 'registration_open') {
-      throw new AppError(409, 'REGISTRATION_CLOSED', 'Event registration is not open.');
-    }
+    assertEventRegistrationOpen(event.status);
 
     const participant = await prisma.eventParticipant.create({
       data: { eventId: event.id, userId: req.user!.sub },
@@ -180,6 +179,10 @@ router.put(
       const { status } = req.body;
       const userId = req.user!.sub;
       const eventId = req.params.id;
+
+      const event = await prisma.event.findUnique({ where: { id: eventId } });
+      if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
+      assertEventIsActive(event.status);
 
       const participant = await prisma.eventParticipant.findUnique({
         where: { eventId_userId: { eventId, userId } },
