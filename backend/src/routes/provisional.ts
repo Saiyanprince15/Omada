@@ -5,6 +5,7 @@ import { authenticate } from '../middleware/auth';
 import { validate, respondProvisionalSchema } from '../lib/validation';
 import { AppError } from '../middleware/errorHandler';
 import { sendNotification, sendBulkNotifications } from '../services/notificationService';
+import { assertEventIsActive } from '../lib/eventLifecycle';
 
 const router = Router({ mergeParams: true });
 
@@ -69,6 +70,11 @@ router.post(
       });
 
       if (!pt || pt.eventId !== event_id) throw new AppError(404, 'NOT_FOUND', 'Provisional team not found.');
+
+      const event = await prisma.event.findUnique({ where: { id: event_id } });
+      if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
+      assertEventIsActive(event.status);
+
       if (pt.status !== 'pending') throw new AppError(409, 'ALREADY_RESOLVED', `Provisional team is already ${pt.status}.`);
       if (pt.expiresAt < new Date()) throw new AppError(409, 'EXPIRED', 'This provisional team has expired.');
 
