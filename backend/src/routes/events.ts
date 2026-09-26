@@ -4,6 +4,7 @@ import { authenticate, requireAdmin } from '../middleware/auth';
 import { validate, createEventSchema, updateParticipationSchema } from '../lib/validation';
 import { AppError } from '../middleware/errorHandler';
 import { sendNotification } from '../services/notificationService';
+import { normalizeRole, normalizeSkill } from '../lib/normalize';
 
 const router = Router();
 
@@ -100,13 +101,13 @@ router.post(
           matchmakingEnabled: body.matchmaking_enabled,
           requiredSkills: {
             create: (body.required_skills ?? []).map((s: { skill_name: string; constraint_type: 'hard' | 'soft' }) => ({
-              skillName: s.skill_name,
+              skillName: normalizeSkill(s.skill_name),
               constraintType: s.constraint_type,
             })),
           },
           requiredRoles: {
             create: (body.required_roles ?? []).map((r: { role_name: string; constraint_type: 'hard' | 'soft' }) => ({
-              roleName: r.role_name,
+              roleName: normalizeRole(r.role_name),
               constraintType: r.constraint_type,
             })),
           },
