@@ -140,14 +140,6 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
       throw new AppError(403, 'FORBIDDEN', 'Only the event organizer can trigger matchmaking.');
     }
 
-    const poolSize = await prisma.eventParticipant.count({
-      where: { eventId: event_id, status: 'in_matchmaking' },
-    });
-
-    // Need at least 2 participants to form any meaningful team
-    if (poolSize < 2) {
-      throw new AppError(409, 'INSUFFICIENT_PARTICIPANTS', 'Need at least 2 participants in the queue to run matchmaking.');
-    }
 
     const weights: MatchWeights = req.body?.weights
       ? {
@@ -160,9 +152,26 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
         }
       : DEFAULT_WEIGHTS;
 
-    // Create round record first (runs async)
-    const round = await prisma.matchingRound.create({
-      data: { eventId: event_id, status: 'running', participantsCount: poolSize, algorithmParams: weights as object },
+    // Atomically claim the event's matchmaking slot. PostgreSQL transaction-level
+    // advisory locks serialize concurrent run requests for the same event.
+    const round = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(\${event_id}))`;
+
+      const activeRound = await tx.matchingRound.findFirst({
+        where: { eventId: event_id, status: 'running' },
+        orderBy: { startedAt: 'desc' },
+      });
+      if (activeRound) {
+        throw new AppError(409, 'MATCHMAKING_ALREADY_RUNNING', 'Matchmaking is already running for this event.');
+      }
+
+      const poolSize = await tx.eventParticipant.count({
+        where: { eventId: event_id, status: 'in_matchmaking' },
+      });
+
+      return tx.matchingRound.create({
+        data: { eventId: event_id, status: 'running', participantsCount: poolSize, algorithmParams: weights as object },
+      });
     });
 
     // Fire and forget — respond immediately with round ID
@@ -204,7 +213,7 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
     res.status(202).json({
       round_id: round.id,
       status: 'running',
-      participants_count: poolSize,
+      participants_count: round.participantsCount,
     });
   } catch (err) {
     next(err);
