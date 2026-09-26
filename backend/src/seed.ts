@@ -271,7 +271,7 @@ async function main() {
 
   // ─── Team (manual, forming) ───────────────────────────────────────────────
   const chatRoom = await prisma.chatRoom.create({
-    data: { roomType: 'permanent', status: 'active' },
+    data: { roomType: 'provisional', status: 'active' },
   });
 
   const team = await prisma.team.create({
