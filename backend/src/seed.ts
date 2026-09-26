@@ -270,10 +270,6 @@ async function main() {
   console.log('🎟️  Registered 5 participants for event.');
 
   // ─── Team (manual, forming) ───────────────────────────────────────────────
-  const chatRoom = await prisma.chatRoom.create({
-    data: { roomType: 'provisional', status: 'active' },
-  });
-
   const team = await prisma.team.create({
     data: {
       eventId: event.id,
@@ -282,7 +278,7 @@ async function main() {
       ownerId: alice.id,
       status: 'forming',
       source: 'manual',
-      chatRoomId: chatRoom.id,
+      chatRoomId: null,
       projectIdea: 'An AI assistant that helps teams discover complementary members.',
       requirements: {
         create: [
