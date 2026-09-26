@@ -58,6 +58,12 @@ export function errorHandler(
       });
       return;
     }
+    if (prismaErr.code === 'P2034') {
+      res.status(409).json({
+        error: { code: 'TRANSACTION_CONFLICT', message: 'The operation conflicted with another request. Please retry.' },
+      });
+      return;
+    }
   }
 
   // Unexpected errors
