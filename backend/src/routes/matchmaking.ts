@@ -5,6 +5,7 @@ import { AppError } from '../middleware/errorHandler';
 import { runAutoMatch, DEFAULT_WEIGHTS, MatchWeights } from '../services/matchingEngine';
 import { redisRateLimit } from '../middleware/rateLimiter';
 import { sendNotification } from '../services/notificationService';
+import { assertEventMatchmakingOpen } from '../lib/eventLifecycle';
 
 const router = Router({ mergeParams: true });
 
@@ -117,6 +118,7 @@ router.post(
       if (!event || !event.matchmakingEnabled) {
         throw new AppError(409, 'MATCHMAKING_DISABLED', 'Auto-matchmaking is not enabled for this event.');
       }
+      assertEventMatchmakingOpen(event.status);
 
       // Snapshot profile at time of entry
       const user = await prisma.user.findUnique({
