@@ -19,6 +19,7 @@ enum UserEventStatus {
   looking_for_team
   in_matchmaking
   in_provisional_team
+  in_forming_team
   in_finalized_team
   withdrawn
 }
@@ -132,18 +133,20 @@ enum MatchingRoundStatus {
 // ─────────────────────────────────────────
 
 model User {
-  id           String    @id @default(uuid())
-  email        String    @unique
-  passwordHash String    @map("password_hash")
-  displayName  String    @map("display_name")
-  avatarUrl    String?   @map("avatar_url")
-  bio          String?
-  isVerified   Boolean   @default(false) @map("is_verified")
-  isAdmin      Boolean   @default(false) @map("is_admin")
-  lastLoginAt  DateTime? @map("last_login_at")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
-  deletedAt    DateTime? @map("deleted_at")
+  id                  String    @id @default(uuid())
+  email               String    @unique
+  passwordHash        String    @map("password_hash")
+  displayName         String    @map("display_name")
+  avatarUrl           String?   @map("avatar_url")
+  bio                 String?
+  isVerified          Boolean   @default(false) @map("is_verified")
+  isAdmin             Boolean   @default(false) @map("is_admin")
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+  lastLoginAt         DateTime? @map("last_login_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+  deletedAt           DateTime? @map("deleted_at")
 
   // Relations
   skills            UserSkill[]
@@ -230,8 +233,6 @@ model Event {
   name                String
   description         String?
   eventType           EventType   @map("event_type")
-  minTeamSize         Int         @default(2) @map("min_team_size")
-  maxTeamSize         Int         @default(5) @map("max_team_size")
   registrationOpens   DateTime?   @map("registration_opens")
   registrationCloses  DateTime?   @map("registration_closes")
   eventStarts         DateTime?   @map("event_starts")
@@ -321,7 +322,6 @@ model Team {
   description  String?
   ownerId      String     @map("owner_id")
   status       TeamStatus @default(forming)
-  maxSize      Int        @map("max_size")
   projectIdea  String?    @map("project_idea")
   chatRoomId   String?    @map("chat_room_id")
   source       TeamSource @default(manual)
@@ -382,7 +382,6 @@ model ProvisionalTeam {
   id                String                @id @default(uuid())
   eventId           String                @map("event_id")
   status            ProvisionalTeamStatus @default(pending)
-  targetSize        Int                   @map("target_size")
   matchScore        Decimal?              @map("match_score") @db.Decimal(5, 3)
   matchExplanation  Json?                 @map("match_explanation")
   createdByRound    String?               @map("created_by_round")

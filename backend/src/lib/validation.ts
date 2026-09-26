@@ -78,8 +78,6 @@ export const createEventSchema = z.object({
     name: z.string().min(2).max(200).trim(),
     description: z.string().max(5000).optional(),
     event_type: z.enum(['hackathon', 'academic_project', 'competition', 'research_project', 'other']),
-    min_team_size: z.number().int().min(1).max(20).default(2),
-    max_team_size: z.number().int().min(1).max(20).default(5),
     registration_opens: z.string().datetime().optional(),
     registration_closes: z.string().datetime().optional(),
     event_starts: z.string().datetime().optional(),
@@ -117,7 +115,6 @@ export const createTeamSchema = z.object({
   body: z.object({
     name: z.string().min(2).max(200).trim(),
     description: z.string().max(5000).optional(),
-    max_size: z.number().int().min(1).max(20),
     project_idea: z.string().max(5000).optional(),
     requirements: z
       .array(
