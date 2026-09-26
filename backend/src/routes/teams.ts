@@ -421,6 +421,9 @@ router.post('/:event_id/teams/:team_id/dissolve', authenticate, async (req: Requ
     });
 
     if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+    if (team.status === 'finalized' || team.status === 'locked') {
+      throw new AppError(409, 'TEAM_FINALIZED', 'Cannot dissolve a finalized or locked team.');
+    }
     if (team.status === 'dissolved') throw new AppError(409, 'ALREADY_DISSOLVED', 'Team is already dissolved.');
 
     await prisma.$transaction(async (tx) => {
