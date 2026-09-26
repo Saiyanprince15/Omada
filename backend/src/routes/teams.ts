@@ -5,7 +5,7 @@ import { validate, createTeamSchema, updateTeamSchema, transferOwnershipSchema }
 import { AppError } from '../middleware/errorHandler';
 import { sendNotification } from '../services/notificationService';
 import { rankCandidates, DEFAULT_WEIGHTS } from '../services/matchingEngine';
-import { normalizeSkill } from '../lib/normalize';
+import { normalizeSkill, normalizeRole } from '../lib/normalize';
 import { broadcastTeamUpdate } from '../socket';
 
 const router = Router({ mergeParams: true });
@@ -27,6 +27,17 @@ const TEAM_PUBLIC_INCLUDE = {
   requirements: true,
 };
 
+/**
+ * Verify that the team belongs to the event_id in the URL.
+ * Prevents cross-event authorization bypass.
+ */
+async function requireTeamInEvent(teamId: string, eventId: string) {
+  const team = await prisma.team.findUnique({ where: { id: teamId } });
+  if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+  if (team.eventId !== eventId) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+  return team;
+}
+
 async function requireTeamMembership(
   teamId: string,
   userId: string,
@@ -42,9 +53,29 @@ async function requireTeamMembership(
   return membership;
 }
 
+/**
+ * Guard: reject operations on finalized or dissolved teams (except where explicitly allowed).
+ */
+function requireMutableTeam(team: { status: string }, allowedStatuses: string[] = ['forming']) {
+  if (!allowedStatuses.includes(team.status)) {
+    if (team.status === 'finalized') {
+      throw new AppError(409, 'TEAM_FINALIZED', 'Cannot modify a finalized team.');
+    }
+    if (team.status === 'dissolved') {
+      throw new AppError(409, 'TEAM_DISSOLVED', 'Cannot modify a dissolved team.');
+    }
+    if (team.status === 'locked') {
+      throw new AppError(409, 'TEAM_LOCKED', 'Cannot modify a locked team.');
+    }
+    throw new AppError(409, 'INVALID_STATE', `Cannot modify team in state: ${team.status}.`);
+  }
+}
+
 // ─── POST /v1/events/:event_id/teams ──────────────────────────────────────
 // Creates a manual team. Owner is placed into `in_forming_team` state.
 // Team completion must be explicitly decided (finalize endpoint).
+// Chat room is NOT created here — only a provisional workspace is created.
+// The permanent team chat room is created at finalization time (fix #10).
 router.post(
   '/:event_id/teams',
   authenticate,
@@ -72,7 +103,8 @@ router.post(
       const body = req.body;
 
       const team = await prisma.$transaction(async (tx) => {
-        const chatRoom = await tx.chatRoom.create({ data: { roomType: 'permanent' } });
+        // Create a provisional chat room for the forming team (not permanent yet — fix #10)
+        const chatRoom = await tx.chatRoom.create({ data: { roomType: 'provisional' } });
 
         const newTeam = await tx.team.create({
           data: {
@@ -87,7 +119,8 @@ router.post(
             requirements: {
               create: (body.requirements ?? []).map((r: { type: string; name: string; priority: string }) => ({
                 requirementType: r.type,
-                name: normalizeSkill(r.name),
+                // Use appropriate normalizer based on requirement type (fix #13)
+                name: r.type === 'role' ? normalizeRole(r.name) : normalizeSkill(r.name),
                 priority: r.priority,
               })),
             },
@@ -231,6 +264,7 @@ router.get('/:event_id/teams/:team_id', authenticate, async (req: Request, res: 
       include: TEAM_PUBLIC_INCLUDE,
     });
 
+    // Fix #2: cross-event auth check
     if (!team || team.eventId !== req.params.event_id) {
       throw new AppError(404, 'NOT_FOUND', 'Team not found.');
     }
@@ -252,11 +286,19 @@ router.put(
   validate({ body: updateTeamSchema.shape.body }),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await requireTeamMembership(req.params.team_id, req.user!.sub, ['owner', 'admin']);
+      const { team_id, event_id } = req.params;
+
+      // Fix #2: cross-event auth
+      const teamRecord = await requireTeamInEvent(team_id, event_id);
+
+      // Fix #12: block modifications on finalized teams
+      requireMutableTeam(teamRecord);
+
+      await requireTeamMembership(team_id, req.user!.sub, ['owner', 'admin']);
 
       const body = req.body;
       const team = await prisma.team.update({
-        where: { id: req.params.team_id },
+        where: { id: team_id },
         data: {
           ...(body.name && { name: body.name }),
           ...(body.description !== undefined && { description: body.description }),
@@ -266,7 +308,8 @@ router.put(
               deleteMany: {},
               create: body.requirements.map((r: { type: string; name: string; priority: string }) => ({
                 requirementType: r.type,
-                name: normalizeSkill(r.name),
+                // Fix #13: use appropriate normalizer based on type
+                name: r.type === 'role' ? normalizeRole(r.name) : normalizeSkill(r.name),
                 priority: r.priority,
               })),
             },
@@ -284,9 +327,14 @@ router.put(
 
 // ─── POST /v1/events/:event_id/teams/:team_id/finalize ────────────────────
 // Team completion is ALWAYS explicitly decided by the team (never from member count).
+// Fix #10: Permanent team chat room is created here at finalization time.
 router.post('/:event_id/teams/:team_id/finalize', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { team_id, event_id } = req.params;
+
+    // Fix #2: cross-event auth
+    await requireTeamInEvent(team_id, event_id);
+
     await requireTeamMembership(team_id, req.user!.sub, ['owner']);
 
     const team = await prisma.team.findUnique({
@@ -304,9 +352,17 @@ router.post('/:event_id/teams/:team_id/finalize', authenticate, async (req: Requ
     }
 
     await prisma.$transaction(async (tx) => {
+      // Fix #10: Create the permanent team chat room at finalization
+      const permanentChatRoom = await tx.chatRoom.create({ data: { roomType: 'permanent' } });
+
+      // Archive the old provisional chat room if it exists
+      if (team.chatRoomId) {
+        await tx.chatRoom.update({ where: { id: team.chatRoomId }, data: { status: 'archived' } });
+      }
+
       await tx.team.update({
         where: { id: team_id },
-        data: { status: 'finalized' },
+        data: { status: 'finalized', chatRoomId: permanentChatRoom.id },
       });
 
       // Update all active members to in_finalized_team
@@ -353,6 +409,10 @@ router.post('/:event_id/teams/:team_id/finalize', authenticate, async (req: Requ
 router.post('/:event_id/teams/:team_id/dissolve', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { team_id, event_id } = req.params;
+
+    // Fix #2: cross-event auth
+    await requireTeamInEvent(team_id, event_id);
+
     await requireTeamMembership(team_id, req.user!.sub, ['owner']);
 
     const team = await prisma.team.findUnique({
@@ -409,6 +469,14 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
     const { team_id, event_id } = req.params;
     const userId = req.user!.sub;
 
+    // Fix #2: cross-event auth
+    const teamRecord = await requireTeamInEvent(team_id, event_id);
+
+    // Fix #12: Cannot leave a finalized team (members are locked in)
+    if (teamRecord.status === 'finalized' || teamRecord.status === 'locked') {
+      throw new AppError(409, 'CANNOT_LEAVE_FINALIZED', 'Cannot leave a finalized or locked team. Contact team owner.');
+    }
+
     const membership = await prisma.teamMember.findUnique({
       where: { teamId_userId: { teamId: team_id, userId } },
     });
@@ -421,11 +489,6 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
     });
 
     if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
-
-    // Cannot leave a finalized team — must use dissolve or be removed
-    if (team.status === 'finalized' && membership.roleInTeam === 'owner') {
-      throw new AppError(409, 'CANNOT_LEAVE_FINALIZED', 'Team owner cannot leave a finalized team. Dissolve the team instead.');
-    }
 
     await prisma.$transaction(async (tx) => {
       await tx.teamMember.update({
@@ -467,9 +530,15 @@ router.post(
   validate({ body: transferOwnershipSchema.shape.body }),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { team_id } = req.params;
+      const { team_id, event_id } = req.params;
       const { new_owner_id } = req.body;
       const currentOwnerId = req.user!.sub;
+
+      // Fix #2: cross-event auth
+      const teamRecord = await requireTeamInEvent(team_id, event_id);
+
+      // Fix #12: block on finalized teams
+      requireMutableTeam(teamRecord);
 
       await requireTeamMembership(team_id, currentOwnerId, ['owner']);
 
@@ -510,6 +579,12 @@ router.delete(
       const requesterId = req.user!.sub;
 
       if (requesterId === user_id) throw new AppError(400, 'BAD_REQUEST', 'Use /leave to remove yourself.');
+
+      // Fix #2: cross-event auth
+      const teamRecord = await requireTeamInEvent(team_id, event_id);
+
+      // Fix #12: block member removal on finalized teams
+      requireMutableTeam(teamRecord);
 
       const requesterMembership = await requireTeamMembership(team_id, requesterId, ['owner', 'admin']);
       const targetMembership = await prisma.teamMember.findUnique({
@@ -563,6 +638,13 @@ router.delete(
 router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { team_id, event_id } = req.params;
+
+    // Fix #2: cross-event auth
+    const teamRecord = await requireTeamInEvent(team_id, event_id);
+
+    // Fix #12: no candidate search for finalized teams
+    requireMutableTeam(teamRecord);
+
     await requireTeamMembership(team_id, req.user!.sub, ['owner', 'admin']);
 
     const team = await prisma.team.findUnique({
@@ -587,7 +669,7 @@ router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Req
 
     if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
 
-    // Load available candidates (looking for team or in forming teams — can still be invited)
+    // Load available candidates (looking for team or registered — can still be invited)
     const availableParticipants = await prisma.eventParticipant.findMany({
       where: { eventId: event_id, status: { in: ['looking_for_team', 'registered'] } },
       include: { user: { include: { skills: true, interests: true, preferredRoles: true } } },

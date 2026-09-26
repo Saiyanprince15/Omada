@@ -244,4 +244,21 @@ router.get('/search', authenticate, async (req: Request, res: Response, next: Ne
   }
 });
 
+// GET /v1/users/:id — Public user profile by ID
+// Registered AFTER /search so that /search is not captured by :id
+router.get('/:id', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.id, deletedAt: null },
+      select: PUBLIC_USER_SELECT,
+    });
+
+    if (!user) throw new AppError(404, 'NOT_FOUND', 'User not found.');
+
+    res.json(user);
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;
