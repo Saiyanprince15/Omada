@@ -208,7 +208,17 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
           });
         }
       })
-      .catch((err) => console.error('[matchmaking] Error running auto-match:', err));
+      .catch(async (err) => {
+        console.error('[matchmaking] Error running auto-match:', err);
+        try {
+          await prisma.matchingRound.update({
+            where: { id: round.id },
+            data: { status: 'failed', completedAt: new Date() },
+          });
+        } catch (updateErr) {
+          console.error('[matchmaking] Failed to mark round as failed:', updateErr);
+        }
+      });
 
     res.status(202).json({
       round_id: round.id,
