@@ -161,8 +161,22 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
         where: { eventId: event_id, status: 'running' },
         orderBy: { startedAt: 'desc' },
       });
+
       if (activeRound) {
-        throw new AppError(409, 'MATCHMAKING_ALREADY_RUNNING', 'Matchmaking is already running for this event.');
+        // A process crash can leave a fire-and-forget round stuck forever.
+        // Treat sufficiently old running rounds as abandoned and recover the
+        // event rather than blocking matchmaking permanently.
+        const staleAfterMs = 30 * 60 * 1000;
+        const stale = Date.now() - activeRound.startedAt.getTime() > staleAfterMs;
+
+        if (!stale) {
+          throw new AppError(409, 'MATCHMAKING_ALREADY_RUNNING', 'Matchmaking is already running for this event.');
+        }
+
+        await tx.matchingRound.update({
+          where: { id: activeRound.id },
+          data: { status: 'failed', completedAt: new Date() },
+        });
       }
 
       const poolSize = await tx.eventParticipant.count({
