@@ -10,9 +10,14 @@ import { authenticate } from '../middleware/auth';
 
 const router = Router();
 
+// Maximum failed login attempts before lockout
+const MAX_FAILED_ATTEMPTS = 5;
+// Lockout duration: 15 minutes
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+
 const authRateLimit = rateLimit({
   windowMs: 60_000,
-  max: 5,
+  max: 10,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: { code: 'RATE_LIMITED', message: 'Too many auth attempts. Try again in a minute.' } },
@@ -68,17 +73,52 @@ router.post(
 
       const user = await prisma.user.findUnique({ where: { email } });
 
-      // Constant-time comparison to prevent timing attacks
-      const dummyHash = '$2a$12$invalidhashfortimingnormalization';
+      // Constant-time comparison to prevent timing attacks (always hash compare)
+      const dummyHash = '$2a$12$invalidhashfortimingnormalizationnnnnnnnnnnnnnnnnn';
       const passwordMatch = user
         ? await bcrypt.compare(password, user.passwordHash)
         : await bcrypt.compare(password, dummyHash);
 
-      if (!user || !passwordMatch || user.deletedAt) {
+      // Account does not exist
+      if (!user || user.deletedAt) {
         throw new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password.');
       }
 
-      await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+      // Check if account is locked
+      if (user.lockedUntil && user.lockedUntil > new Date()) {
+        const retryAfterSeconds = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 1000);
+        throw new AppError(
+          429,
+          'ACCOUNT_LOCKED',
+          `Account is temporarily locked due to too many failed login attempts. Try again in ${Math.ceil(retryAfterSeconds / 60)} minute(s).`
+        );
+      }
+
+      if (!passwordMatch) {
+        // Increment failed attempts
+        const newFailedAttempts = (user.failedLoginAttempts ?? 0) + 1;
+        const shouldLock = newFailedAttempts >= MAX_FAILED_ATTEMPTS;
+
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            failedLoginAttempts: newFailedAttempts,
+            ...(shouldLock ? { lockedUntil: new Date(Date.now() + LOCKOUT_DURATION_MS) } : {}),
+          },
+        });
+
+        throw new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password.');
+      }
+
+      // Successful login — reset lockout fields
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          lastLoginAt: new Date(),
+        },
+      });
 
       const family = uuidv4();
       const accessToken = signAccessToken({ sub: user.id, email: user.email, isAdmin: user.isAdmin });
@@ -114,6 +154,10 @@ router.post(
         }
         if (err.message === 'REFRESH_TOKEN_EXPIRED') {
           next(new AppError(401, 'TOKEN_EXPIRED', 'Refresh token has expired. Please log in again.'));
+          return;
+        }
+        if (err.message === 'INVALID_REFRESH_TOKEN' || err.message === 'USER_NOT_FOUND') {
+          next(new AppError(401, 'INVALID_TOKEN', 'Invalid refresh token.'));
           return;
         }
       }

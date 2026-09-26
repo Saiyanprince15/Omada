@@ -1,15 +1,16 @@
 /**
  * TeamForge Matching Engine
  *
- * Implements the algorithm described in docs/matching-algorithm.md.
+ * Implements skill/role/interest-based team formation with no fixed team-size constraints.
+ * Team size is determined by the algorithm based on pool size and configured target group size.
+ * Team completion is ALWAYS decided explicitly by the team via the finalize endpoint.
  *
  * Two entry points:
- *   - runAutoMatch(eventId, weights?)  → creates provisional teams
- *   - rankCandidates(team, candidates) → ranks users for an existing team
+ *   - runAutoMatch(eventId, roundId, weights?)  → creates provisional teams
+ *   - rankCandidates(team, candidates)          → ranks users for an existing team
  */
 
 import { prisma } from '../lib/prisma';
-import { v4 as uuidv4 } from 'uuid';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -61,9 +62,8 @@ interface TeamScore {
   components: ScoreComponents;
 }
 
+// Event constraints no longer include team size bounds — those are not part of the schema.
 interface EventConstraints {
-  minTeamSize: number;
-  maxTeamSize: number;
   hardSkills: string[];
   softSkills: string[];
   hardRoles: string[];
@@ -171,9 +171,7 @@ function preferenceSatisfactionScore(team: TeamComposition): number {
     for (const role of sorted) {
       const existing = claimedRoles.get(role.roleName);
       if (!existing || existing.priority > role.priority) {
-        // This member gets the role (or takes it with higher priority)
         if (existing) {
-          // Previous holder loses this role — they'll be re-evaluated (simplified: give base score)
           satisfactions.push(0.2);
         }
         claimedRoles.set(role.roleName, { userId: member.userId, priority: role.priority });
@@ -497,30 +495,33 @@ function buildMemberExplanation(
 // Main Auto-Match Entry Point
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Default target group size — groups of ~4 work well for hackathons.
+// With no fixed team-size rules, this is just a heuristic target.
+const DEFAULT_TARGET_GROUP_SIZE = 4;
+
 export async function runAutoMatch(
   eventId: string,
+  roundId: string,
   weights: MatchWeights = DEFAULT_WEIGHTS
 ): Promise<{
   roundId: string;
   teamsFormed: number;
   unmatched: string[];
 }> {
-  // 1. Load event constraints
+  // 1. Load event constraints (no size fields — just skill/role requirements)
   const event = await prisma.event.findUniqueOrThrow({
     where: { id: eventId },
     include: { requiredSkills: true, requiredRoles: true },
   });
 
   const constraints: EventConstraints = {
-    minTeamSize: event.minTeamSize,
-    maxTeamSize: event.maxTeamSize,
     hardSkills: event.requiredSkills.filter((s) => s.constraintType === 'hard').map((s) => s.skillName),
     softSkills: event.requiredSkills.filter((s) => s.constraintType === 'soft').map((s) => s.skillName),
     hardRoles: event.requiredRoles.filter((r) => r.constraintType === 'hard').map((r) => r.roleName),
     softRoles: event.requiredRoles.filter((r) => r.constraintType === 'soft').map((r) => r.roleName),
   };
 
-  // 2. Load matchmaking pool
+  // 2. Load matchmaking pool — only users currently in_matchmaking
   const participants = await prisma.eventParticipant.findMany({
     where: { eventId, status: 'in_matchmaking' },
     include: {
@@ -548,22 +549,13 @@ export async function runAutoMatch(
     matchmakingRestarts: p.matchmakingRestarts,
   }));
 
-  // Create matchmaking round record
-  const round = await prisma.matchingRound.create({
-    data: {
-      eventId,
-      status: 'running',
-      participantsCount: pool.length,
-      algorithmParams: weights as unknown as object,
-    },
-  });
-
-  if (pool.length < constraints.minTeamSize) {
+  if (pool.length < 2) {
+    // Not enough to form any team
     await prisma.matchingRound.update({
-      where: { id: round.id },
+      where: { id: roundId },
       data: { status: 'completed', teamsFormed: 0, unmatchedCount: pool.length, completedAt: new Date() },
     });
-    return { roundId: round.id, teamsFormed: 0, unmatched: pool.map((u) => u.userId) };
+    return { roundId, teamsFormed: 0, unmatched: pool.map((u) => u.userId) };
   }
 
   // 3. Precompute global metrics
@@ -573,14 +565,15 @@ export async function runAutoMatch(
       ? 0.5
       : pool.reduce((sum, u) => sum + experienceScore(u), 0) / pool.length;
 
-  const targetTeamSize = constraints.maxTeamSize;
-  const k = Math.floor(pool.length / targetTeamSize);
+  // Target group size: use default heuristic; number of groups = floor(pool / target)
+  const targetGroupSize = DEFAULT_TARGET_GROUP_SIZE;
+  const k = Math.max(1, Math.floor(pool.length / targetGroupSize));
 
   // 4. Seed selection (k-means++)
   const seeds = selectSeeds(pool, k);
   const teams: TeamComposition[] = seeds.map((seed) => ({ members: [seed] }));
 
-  // 5. Greedy assignment
+  // 5. Greedy assignment — round-robin across teams, picking best marginal contributor
   const assigned = new Set(seeds.map((s) => s.userId));
   const remaining = pool.filter((u) => !assigned.has(u.userId));
 
@@ -588,13 +581,6 @@ export async function runAutoMatch(
   while (remaining.length > 0) {
     const teamIndex = roundIndex % teams.length;
     const team = teams[teamIndex]!;
-
-    if (team.members.length >= targetTeamSize) {
-      roundIndex++;
-      // Check if all teams are full
-      if (teams.every((t) => t.members.length >= targetTeamSize)) break;
-      continue;
-    }
 
     // Find best candidate for this team
     let bestCandidate: UserProfile | null = null;
@@ -620,9 +606,12 @@ export async function runAutoMatch(
     }
 
     roundIndex++;
+
+    // Safety: if we've gone through all teams and can't assign anyone, break
+    if (roundIndex > teams.length * pool.length) break;
   }
 
-  // 6. Fairness pass — swap to reduce score gap
+  // 6. Fairness pass — swap to reduce score gap between teams
   const MAX_SWAPS = 100;
   const FAIRNESS_THRESHOLD = 0.15;
 
@@ -680,21 +669,27 @@ export async function runAutoMatch(
     if (!swapped) break;
   }
 
-  // 7. Handle remainders
+  // 7. Handle remainders — solo users or very small groups
+  // Without a fixed minimum, teams of 1 are not valid provisional teams.
+  // Teams with 2+ members are kept; solo members are unmatched.
   const unmatchedUserIds: string[] = [];
-  const finalTeams = teams.filter((t) => t.members.length >= constraints.minTeamSize);
-  const tooSmall = teams.filter((t) => t.members.length < constraints.minTeamSize && t.members.length > 0);
+  const finalTeams = teams.filter((t) => t.members.length >= 2);
+  const tooSmall = teams.filter((t) => t.members.length < 2 && t.members.length > 0);
 
   for (const smallTeam of tooSmall) {
     for (const member of smallTeam.members) {
       // Try to add to existing teams
       let added = false;
       for (const team of finalTeams) {
-        if (team.members.length < constraints.maxTeamSize) {
-          team.members.push(member);
-          added = true;
-          break;
-        }
+        // No upper cap — add to team with lowest score (most benefit from another member)
+        const scores = finalTeams.map((t) =>
+          computeTeamScore(t, constraints, poolUniqueSkills, globalExpAvg, weights).total
+        );
+        const lowestScoreIdx = scores.indexOf(Math.min(...scores));
+        const targetTeam = finalTeams[lowestScoreIdx]!;
+        targetTeam.members.push(member);
+        added = true;
+        break;
       }
       if (!added) unmatchedUserIds.push(member.userId);
     }
@@ -708,20 +703,19 @@ export async function runAutoMatch(
       const teamScore = computeTeamScore(team, constraints, poolUniqueSkills, globalExpAvg, weights);
       const explanation = buildTeamExplanation(team, teamScore, constraints, poolUniqueSkills);
 
-      // Create chat room
+      // Create provisional chat room
       const chatRoom = await tx.chatRoom.create({
         data: { roomType: 'provisional', status: 'active' },
       });
 
-      // Create provisional team
+      // Create provisional team (no targetSize field — not in schema)
       const pt = await tx.provisionalTeam.create({
         data: {
           eventId,
           status: 'pending',
-          targetSize: team.members.length,
           matchScore: teamScore.total,
           matchExplanation: explanation as object,
-          createdByRound: round.id,
+          createdByRound: roundId,
           chatRoomId: chatRoom.id,
           expiresAt,
         },
@@ -746,7 +740,7 @@ export async function runAutoMatch(
           },
         });
 
-        // Update participant state
+        // Update participant state to in_provisional_team
         await tx.eventParticipant.update({
           where: { eventId_userId: { eventId, userId: member.userId } },
           data: {
@@ -771,7 +765,7 @@ export async function runAutoMatch(
     }
 
     await tx.matchingRound.update({
-      where: { id: round.id },
+      where: { id: roundId },
       data: {
         status: 'completed',
         teamsFormed: finalTeams.length,
@@ -782,7 +776,7 @@ export async function runAutoMatch(
   });
 
   return {
-    roundId: round.id,
+    roundId,
     teamsFormed: finalTeams.length,
     unmatched: unmatchedUserIds,
   };

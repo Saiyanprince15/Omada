@@ -4,6 +4,7 @@ import { authenticate } from '../middleware/auth';
 import { validate, sendMessageSchema } from '../lib/validation';
 import { AppError } from '../middleware/errorHandler';
 import { redisRateLimit } from '../middleware/rateLimiter';
+import { broadcastChatMessage } from '../socket';
 
 const router = Router();
 
@@ -57,6 +58,7 @@ router.get('/rooms/:room_id/messages', authenticate, async (req: Request, res: R
 });
 
 // ─── POST /v1/chat/rooms/:room_id/messages ────────────────────────────────
+// Creates a message via HTTP and broadcasts it to Socket.IO room subscribers.
 router.post(
   '/rooms/:room_id/messages',
   authenticate,
@@ -84,7 +86,9 @@ router.post(
         },
       });
 
-      // Socket.IO handles fan-out to room members (see socket.ts)
+      // Broadcast to all connected Socket.IO clients in this room
+      broadcastChatMessage(room_id, message);
+
       res.status(201).json({ message });
     } catch (err) {
       next(err);

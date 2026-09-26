@@ -37,16 +37,19 @@ router.post(
         if (team.status !== 'forming') throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is not accepting requests.');
         recipientId = team.ownerId;
 
-        // Check capacity
-        const memberCount = await prisma.teamMember.count({ where: { teamId: body.team_id, leftAt: null } });
-        if (memberCount >= team.maxSize) throw new AppError(409, 'TEAM_FULL', 'This team has no available slots.');
+        // Sender must be available (not already in a team)
+        const unavailableStates = ['in_forming_team', 'in_finalized_team', 'in_provisional_team', 'in_matchmaking'];
+        if (unavailableStates.includes(senderParticipant.status)) {
+          throw new AppError(409, 'USER_UNAVAILABLE', 'You are already in a team or matchmaking process.');
+        }
 
       } else {
-        // team_invite or personal_invite: verify sender is team member
+        // team_invite or personal_invite: verify sender is team member/owner
         recipientId = body.recipient_id;
 
         const team = await prisma.team.findUnique({ where: { id: body.team_id } });
         if (!team || team.eventId !== event_id) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+        if (team.status !== 'forming') throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is not accepting new members.');
 
         const senderMembership = await prisma.teamMember.findUnique({
           where: { teamId_userId: { teamId: body.team_id, userId: senderId } },
@@ -59,7 +62,8 @@ router.post(
         const recipientParticipant = await prisma.eventParticipant.findUnique({
           where: { eventId_userId: { eventId: event_id, userId: recipientId } },
         });
-        if (!recipientParticipant || recipientParticipant.status === 'in_finalized_team') {
+        const unavailableStates = ['in_forming_team', 'in_finalized_team', 'in_provisional_team', 'in_matchmaking'];
+        if (!recipientParticipant || unavailableStates.includes(recipientParticipant.status)) {
           throw new AppError(409, 'USER_UNAVAILABLE', 'User is not available for invitations.');
         }
       }
@@ -197,33 +201,49 @@ router.put(
       }
 
       // action === 'accept'
-      // Use a transaction + row-level lock to prevent race conditions
+      // Use a transaction to prevent race conditions — simultaneous accepts cannot create duplicate memberships
       const result = await prisma.$transaction(async (tx) => {
-        // Lock the invitee's participant row
+        // Re-read the participant row within the transaction (serializable)
         const participant = await tx.eventParticipant.findUniqueOrThrow({
           where: { eventId_userId: { eventId: event_id, userId } },
         });
 
-        if (participant.status === 'in_finalized_team') {
-          throw new AppError(409, 'ALREADY_IN_TEAM', 'You have already joined a team.');
+        // User must be available to join
+        const unavailableStates = ['in_forming_team', 'in_finalized_team', 'in_provisional_team', 'in_matchmaking'];
+        if (unavailableStates.includes(participant.status)) {
+          throw new AppError(409, 'ALREADY_IN_TEAM', 'You are already in a team or matchmaking process.');
         }
 
-        // Lock and check team slot
         const teamId = request.teamId!;
-        const memberCount = await tx.teamMember.count({ where: { teamId, leftAt: null } });
-        const team = await tx.team.findUniqueOrThrow({ where: { id: teamId } });
 
-        if (memberCount >= team.maxSize) {
-          throw new AppError(409, 'TEAM_FULL', 'The team has no available slots.');
+        // Re-read team state within transaction
+        const team = await tx.team.findUniqueOrThrow({ where: { id: teamId } });
+        if (team.status !== 'forming') {
+          throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is no longer recruiting.');
         }
 
-        // Add member
-        await tx.teamMember.create({ data: { teamId, userId, roleInTeam: 'member' } });
+        // Check if user is already a member (prevents double-add from concurrent requests)
+        const existingMembership = await tx.teamMember.findUnique({
+          where: { teamId_userId: { teamId, userId } },
+        });
+        if (existingMembership && !existingMembership.leftAt) {
+          throw new AppError(409, 'ALREADY_MEMBER', 'You are already a member of this team.');
+        }
 
-        // Update participant state
+        // Add member — if existingMembership exists (left), update; else create
+        if (existingMembership) {
+          await tx.teamMember.update({
+            where: { teamId_userId: { teamId, userId } },
+            data: { leftAt: null, roleInTeam: 'member' },
+          });
+        } else {
+          await tx.teamMember.create({ data: { teamId, userId, roleInTeam: 'member' } });
+        }
+
+        // Update participant to in_forming_team (not finalized — team decides completion)
         await tx.eventParticipant.update({
           where: { eventId_userId: { eventId: event_id, userId } },
-          data: { status: 'in_finalized_team', teamId },
+          data: { status: 'in_forming_team', teamId },
         });
 
         // Mark request accepted

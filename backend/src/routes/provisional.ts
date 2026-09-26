@@ -48,6 +48,10 @@ router.get(
 );
 
 // ─── POST /v1/events/:event_id/provisional-teams/:pt_id/respond ───────────
+// Handles accept / reject.
+// Rejection below threshold: dissolves team and returns all members to looking_for_team.
+// Rejection above threshold: simply marks member as rejected (team continues).
+// All-accepted: converts to permanent forming team (NOT finalized — team must explicitly finalize).
 router.post(
   '/:event_id/provisional-teams/:pt_id/respond',
   authenticate,
@@ -65,9 +69,10 @@ router.post(
 
       if (!pt || pt.eventId !== event_id) throw new AppError(404, 'NOT_FOUND', 'Provisional team not found.');
       if (pt.status !== 'pending') throw new AppError(409, 'ALREADY_RESOLVED', `Provisional team is already ${pt.status}.`);
+      if (pt.expiresAt < new Date()) throw new AppError(409, 'EXPIRED', 'This provisional team has expired.');
 
       const myMembership = pt.members.find((m) => m.userId === userId);
-      if (!myMembership || !['pending'].includes(myMembership.status)) {
+      if (!myMembership || myMembership.status !== 'pending') {
         throw new AppError(403, 'FORBIDDEN', 'You cannot respond to this provisional team.');
       }
 
@@ -83,22 +88,20 @@ router.post(
             data: { status: 'looking_for_team', provisionalTeamId: null },
           });
 
-          // Check remaining viability
+          // Remaining members = those who haven't rejected or left
           const remaining = pt.members.filter(
             (m) => m.userId !== userId && ['pending', 'accepted'].includes(m.status)
           );
 
-          const event = await tx.event.findUnique({ where: { id: event_id } });
-          if (!event) return;
-
-          if (remaining.length < event.minTeamSize) {
-            // Dissolve — not enough members
+          // With unlimited team sizes there's no fixed minimum —
+          // if only 1 person remains, dissolve (a team of 1 is not viable).
+          if (remaining.length < 1) {
             await tx.provisionalTeam.update({
               where: { id: pt_id },
               data: { status: 'dissolved' },
             });
 
-            // Return remaining members to looking_for_team
+            // Return any remaining pending/accepted members to looking_for_team
             for (const member of remaining) {
               await tx.eventParticipant.update({
                 where: { eventId_userId: { eventId: event_id, userId: member.userId } },
@@ -110,7 +113,6 @@ router.post(
               });
             }
 
-            // Notify all remaining members
             await sendBulkNotifications(
               remaining.map((m) => ({
                 userId: m.userId,
@@ -122,14 +124,14 @@ router.post(
               }))
             );
           } else {
-            // Notify remaining members
+            // Team can continue — notify remaining members
             await sendBulkNotifications(
               remaining.map((m) => ({
                 userId: m.userId,
                 eventId: event_id,
                 type: 'provisional_member_responded' as const,
                 title: 'A team member declined.',
-                body: 'A member rejected the provisional match.',
+                body: 'A member rejected the provisional match. You may still accept.',
                 data: { provisional_team_id: pt_id },
               }))
             );
@@ -142,52 +144,58 @@ router.post(
 
       // action === 'accept'
       const result = await prisma.$transaction(async (tx) => {
+        // Mark this user as accepted
         await tx.provisionalTeamMember.update({
           where: { provisionalTeamId_userId: { provisionalTeamId: pt_id, userId } },
           data: { status: 'accepted', respondedAt: new Date() },
         });
 
-        // Check if all members accepted
+        // Re-read all members within transaction
         const allMembers = await tx.provisionalTeamMember.findMany({
           where: { provisionalTeamId: pt_id },
         });
 
-        const allAccepted = allMembers.every((m) =>
+        // Active members = not rejected/left/expired/replaced
+        const activeMembers = allMembers.filter((m) =>
+          m.userId === userId ? true : ['pending', 'accepted'].includes(m.status)
+        );
+
+        // Check if all active members have accepted
+        const allActiveAccepted = activeMembers.every((m) =>
           m.userId === userId ? true : m.status === 'accepted'
         );
 
-        if (!allAccepted) {
-          const awaiting = allMembers.filter(
+        if (!allActiveAccepted) {
+          const awaitingCount = activeMembers.filter(
             (m) => m.userId !== userId && m.status === 'pending'
           ).length;
-          return { teamStatus: 'pending', awaitingCount: awaiting };
+          return { teamStatus: 'pending', awaitingCount };
         }
 
-        // All accepted — convert to permanent team
+        // All active members accepted — convert to permanent forming team
+        // Team completion must be explicitly decided by the team (not automatic from member count)
         await tx.provisionalTeam.update({ where: { id: pt_id }, data: { status: 'accepted' } });
-
-        const event = await tx.event.findUnique({ where: { id: event_id } });
-        if (!event) throw new AppError(500, 'SERVER_ERROR', 'Event not found.');
 
         // Create permanent chat room
         const permanentChatRoom = await tx.chatRoom.create({ data: { roomType: 'permanent' } });
 
-        // Create team
-        const leaderMemberId = allMembers[0]!.userId;
+        // Use first member (oldest created) as initial owner
+        const sortedMembers = [...activeMembers].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        const leaderMemberId = sortedMembers[0]!.userId;
+
         const team = await tx.team.create({
           data: {
             eventId: event_id,
-            name: `Team-${pt_id.slice(0, 8)}`,  // Default name — can be changed
+            name: `Team-${pt_id.slice(0, 8)}`,
             ownerId: leaderMemberId,
-            maxSize: allMembers.length,
             chatRoomId: permanentChatRoom.id,
-            status: 'finalized',
+            status: 'forming',  // NOT finalized — team must explicitly decide completion
             source: 'auto_match',
           },
         });
 
         // Create team members
-        for (const member of allMembers) {
+        for (const member of activeMembers) {
           await tx.teamMember.create({
             data: {
               teamId: team.id,
@@ -196,9 +204,10 @@ router.post(
             },
           });
 
+          // Move participant to in_forming_team (not in_finalized_team)
           await tx.eventParticipant.update({
             where: { eventId_userId: { eventId: event_id, userId: member.userId } },
-            data: { status: 'in_finalized_team', teamId: team.id, provisionalTeamId: null },
+            data: { status: 'in_forming_team', teamId: team.id, provisionalTeamId: null },
           });
         }
 
@@ -225,8 +234,8 @@ router.post(
             userId: m.userId,
             eventId: event_id,
             type: 'provisional_converted' as const,
-            title: '🎉 Your team is now official!',
-            body: 'All members accepted. Your provisional team has become a permanent team.',
+            title: '🎉 Your provisional team is now a forming team!',
+            body: 'All members accepted. Finalize your team when you are ready.',
             data: { team_id: result.teamId },
           }))
         );

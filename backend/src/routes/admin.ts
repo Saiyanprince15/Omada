@@ -22,14 +22,16 @@ router.get('/events/:event_id/dashboard', authenticate, async (req: Request, res
       lookingCount,
       inMatchmakingCount,
       inProvisionalCount,
-      finalizedCount,
+      inFormingCount,
+      inFinalizedCount,
       teamCount,
-      pendingReports,
+      withdrawnCount,
     ] = await Promise.all([
       prisma.eventParticipant.count({ where: { eventId: event_id } }),
       prisma.eventParticipant.count({ where: { eventId: event_id, status: 'looking_for_team' } }),
       prisma.eventParticipant.count({ where: { eventId: event_id, status: 'in_matchmaking' } }),
       prisma.eventParticipant.count({ where: { eventId: event_id, status: 'in_provisional_team' } }),
+      prisma.eventParticipant.count({ where: { eventId: event_id, status: 'in_forming_team' } }),
       prisma.eventParticipant.count({ where: { eventId: event_id, status: 'in_finalized_team' } }),
       prisma.team.count({ where: { eventId: event_id, status: { not: 'dissolved' } } }),
       prisma.eventParticipant.count({ where: { eventId: event_id, status: 'withdrawn' } }),
@@ -72,8 +74,9 @@ router.get('/events/:event_id/dashboard', authenticate, async (req: Request, res
         looking: lookingCount,
         in_matchmaking: inMatchmakingCount,
         in_provisional: inProvisionalCount,
-        finalized: finalizedCount,
-        withdrawn: pendingReports,
+        in_forming_team: inFormingCount,
+        in_finalized_team: inFinalizedCount,
+        withdrawn: withdrawnCount,
       },
       teams: {
         total: teamCount,
@@ -82,7 +85,6 @@ router.get('/events/:event_id/dashboard', authenticate, async (req: Request, res
           name: t.name,
           status: t.status,
           member_count: t.members.length,
-          max_size: t.maxSize,
         })),
       },
       skill_distribution: Object.fromEntries(
@@ -116,6 +118,10 @@ router.get('/events', authenticate, requireAdmin, async (req: Request, res: Resp
 router.put('/events/:event_id/status', authenticate, requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { status } = req.body;
+
+    if (!['draft', 'registration_open', 'registration_closed', 'in_progress', 'completed', 'cancelled'].includes(status)) {
+      throw new AppError(400, 'INVALID_STATUS', 'Invalid event status.');
+    }
 
     const event = await prisma.event.update({
       where: { id: req.params.event_id },
@@ -155,6 +161,11 @@ router.delete('/events/:event_id/teams/:team_id', authenticate, async (req: Requ
           data: { status: 'looking_for_team', teamId: null },
         });
       }
+      // Cancel all pending requests for this team
+      await tx.requestInvitation.updateMany({
+        where: { teamId: team_id, status: 'pending' },
+        data: { status: 'cancelled' },
+      });
     });
 
     res.status(204).send();

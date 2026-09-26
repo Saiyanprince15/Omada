@@ -72,6 +72,8 @@ export const updateRolesSchema = z.object({
 });
 
 // ─── Events ────────────────────────────────────────────────────────────────
+// NOTE: Events have no min/max team size fields in the schema.
+// Team size is unlimited and team completion is decided by the team.
 
 export const createEventSchema = z.object({
   body: z.object({
@@ -104,11 +106,13 @@ export const createEventSchema = z.object({
 
 export const updateParticipationSchema = z.object({
   body: z.object({
+    // Only these transitions are user-controllable; team transitions happen via team endpoints
     status: z.enum(['looking_for_team', 'registered', 'withdrawn']),
   }),
 });
 
 // ─── Teams ─────────────────────────────────────────────────────────────────
+// Teams have no fixed max_size — size is unlimited and decided by the team.
 
 export const createTeamSchema = z.object({
   params: z.object({ event_id: z.string().uuid() }),

@@ -25,7 +25,18 @@ function getSecret(envVar: string, name: string): string {
 const ACCESS_SECRET = getSecret('JWT_ACCESS_SECRET', 'access');
 const REFRESH_SECRET = getSecret('JWT_REFRESH_SECRET', 'refresh');
 const ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES_IN ?? '15m';
-const REFRESH_EXPIRES = process.env.JWT_REFRESH_EXPIRES_IN ?? '7d';
+const REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN ?? '7d';
+// Parse human-readable expiry string to milliseconds
+const REFRESH_EXPIRES_MS = parseExpiryToMs(REFRESH_EXPIRES_IN);
+
+function parseExpiryToMs(expiry: string): number {
+  const match = expiry.match(/^(\d+)([smhd])$/);
+  if (!match) return 7 * 24 * 60 * 60 * 1000; // default 7d
+  const value = parseInt(match[1]!);
+  const unit = match[2]!;
+  const multipliers: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+  return value * (multipliers[unit] ?? 86_400_000);
+}
 
 export interface AccessTokenPayload {
   sub: string;       // user ID
@@ -35,7 +46,7 @@ export interface AccessTokenPayload {
 
 export interface RefreshTokenPayload {
   sub: string;
-  jti: string;       // unique token ID
+  jti: string;       // unique token ID — bound to exact DB record
   family: string;    // token family for rotation detection
 }
 
@@ -51,7 +62,7 @@ export function signRefreshToken(payload: Omit<RefreshTokenPayload, 'jti'>): {
 } {
   const jti = uuidv4();
   const token = jwt.sign({ ...payload, jti }, REFRESH_SECRET, {
-    expiresIn: REFRESH_EXPIRES,
+    expiresIn: REFRESH_EXPIRES_IN,
   } as jwt.SignOptions);
   return { token, jti };
 }
@@ -71,10 +82,9 @@ export function verifyRefreshToken(token: string): RefreshTokenPayload {
 export async function createRefreshToken(userId: string, family: string): Promise<string> {
   const { token, jti } = signRefreshToken({ sub: userId, family });
 
+  // Store hash of jti (not the full token) for security
   const hash = await bcrypt.hash(jti, 10);
-
-  // Refresh token expires in 7 days
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + REFRESH_EXPIRES_MS);
 
   await prisma.refreshToken.create({
     data: { userId, tokenHash: hash, family, expiresAt },
@@ -85,11 +95,14 @@ export async function createRefreshToken(userId: string, family: string): Promis
 
 /**
  * Validate a refresh token, detect reuse (rotation attack), and issue new tokens.
- * Returns new access + refresh tokens on success.
- * Throws on invalid, reuse, or expired token.
  *
- * Uses atomic conditional update to prevent race conditions:
- * only the first request to mark the token as used will succeed.
+ * Security model:
+ * - Each presented token carries a `jti` in its payload.
+ * - The DB stores a bcrypt hash of the jti, so the DB record is bound to the exact token.
+ * - We look up ALL tokens in the family, find the one whose hash matches the presented jti.
+ * - If the matching record is already used → reuse attack → invalidate entire family.
+ * - If no matching record → token not in DB → invalid.
+ * - Concurrent rotation handled atomically via conditional update (used: false → true).
  */
 export async function rotateRefreshToken(
   token: string
@@ -102,22 +115,43 @@ export async function rotateRefreshToken(
     throw new Error('INVALID_REFRESH_TOKEN');
   }
 
-  // Atomic rotation using a transaction with conditional update
   return await prisma.$transaction(async (tx) => {
-    // Find all tokens in this family
-    const storedTokens = await tx.refreshToken.findMany({
+    // Load all tokens in this family
+    const familyTokens = await tx.refreshToken.findMany({
       where: { userId: payload.sub, family: payload.family },
       orderBy: { createdAt: 'desc' },
     });
 
-    if (!storedTokens.length) {
+    if (!familyTokens.length) {
       throw new Error('INVALID_REFRESH_TOKEN');
     }
 
-    // Check if ANY token in the family was already used (reuse attack)
-    const alreadyUsed = storedTokens.some((t) => t.used);
-    if (alreadyUsed) {
-      // Invalidate entire family — this is a reuse attack
+    // Find the DB record matching this exact token (by comparing jti hash)
+    let matchedToken: typeof familyTokens[0] | null = null;
+    for (const dbToken of familyTokens) {
+      try {
+        const matches = await bcrypt.compare(payload.jti, dbToken.tokenHash);
+        if (matches) {
+          matchedToken = dbToken;
+          break;
+        }
+      } catch {
+        // bcrypt errors on invalid hashes — skip
+      }
+    }
+
+    if (!matchedToken) {
+      // Token not in DB — it could be a forged token or a token from a previous family iteration
+      // Invalidate the entire family as a precaution
+      await tx.refreshToken.updateMany({
+        where: { userId: payload.sub, family: payload.family },
+        data: { used: true },
+      });
+      throw new Error('INVALID_REFRESH_TOKEN');
+    }
+
+    // If the matched token was already used → reuse attack
+    if (matchedToken.used) {
       await tx.refreshToken.updateMany({
         where: { userId: payload.sub, family: payload.family },
         data: { used: true },
@@ -125,22 +159,20 @@ export async function rotateRefreshToken(
       throw new Error('TOKEN_REUSE_DETECTED');
     }
 
-    const currentToken = storedTokens[0]!;
-
-    if (new Date() > currentToken.expiresAt) {
+    // Check expiry
+    if (new Date() > matchedToken.expiresAt) {
       throw new Error('REFRESH_TOKEN_EXPIRED');
     }
 
-    // Atomic conditional update: only mark as used if it's NOT already used
-    // This prevents the race condition where two concurrent requests both succeed
+    // Atomic conditional update: only mark as used if it's still unused
+    // This handles concurrent requests from the same token
     const updated = await tx.refreshToken.updateMany({
-      where: { id: currentToken.id, used: false },
+      where: { id: matchedToken.id, used: false },
       data: { used: true },
     });
 
-    // If no rows were updated, another request already consumed this token
     if (updated.count === 0) {
-      // Token was already used by a concurrent request — treat as reuse
+      // Another concurrent request consumed this token first — treat as reuse
       await tx.refreshToken.updateMany({
         where: { userId: payload.sub, family: payload.family },
         data: { used: true },
@@ -148,7 +180,7 @@ export async function rotateRefreshToken(
       throw new Error('TOKEN_REUSE_DETECTED');
     }
 
-    // Fetch user for access token payload
+    // Fetch user
     const user = await tx.user.findUnique({ where: { id: payload.sub } });
     if (!user || user.deletedAt) throw new Error('USER_NOT_FOUND');
 
@@ -174,7 +206,7 @@ async function createRefreshTokenInTx(
 ): Promise<string> {
   const { token, jti } = signRefreshToken({ sub: userId, family });
   const hash = await bcrypt.hash(jti, 10);
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + REFRESH_EXPIRES_MS);
 
   await tx.refreshToken.create({
     data: { userId, tokenHash: hash, family, expiresAt },

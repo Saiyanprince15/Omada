@@ -5,7 +5,8 @@ import { validate, createTeamSchema, updateTeamSchema, transferOwnershipSchema }
 import { AppError } from '../middleware/errorHandler';
 import { sendNotification } from '../services/notificationService';
 import { rankCandidates, DEFAULT_WEIGHTS } from '../services/matchingEngine';
-import { normalizeSkill, normalizeRole } from '../lib/normalize';
+import { normalizeSkill } from '../lib/normalize';
+import { broadcastTeamUpdate } from '../socket';
 
 const router = Router({ mergeParams: true });
 
@@ -42,6 +43,8 @@ async function requireTeamMembership(
 }
 
 // ─── POST /v1/events/:event_id/teams ──────────────────────────────────────
+// Creates a manual team. Owner is placed into `in_forming_team` state.
+// Team completion must be explicitly decided (finalize endpoint).
 router.post(
   '/:event_id/teams',
   authenticate,
@@ -56,17 +59,17 @@ router.post(
       });
 
       if (!participant) throw new AppError(403, 'NOT_REGISTERED', 'You must register for the event first.');
-      if (participant.status === 'in_finalized_team') {
-        throw new AppError(409, 'ALREADY_IN_TEAM', 'You are already in a finalized team.');
+
+      // Only allow team creation from states where the user is available
+      const allowedStates = ['registered', 'looking_for_team'];
+      if (!allowedStates.includes(participant.status)) {
+        throw new AppError(409, 'INVALID_STATE', `Cannot create a team from state: ${participant.status}.`);
       }
 
-      const body = req.body;
       const event = await prisma.event.findUnique({ where: { id: event_id } });
       if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
 
-      if (body.max_size > event.maxTeamSize) {
-        throw new AppError(400, 'INVALID_SIZE', `max_size cannot exceed event limit of ${event.maxTeamSize}.`);
-      }
+      const body = req.body;
 
       const team = await prisma.$transaction(async (tx) => {
         const chatRoom = await tx.chatRoom.create({ data: { roomType: 'permanent' } });
@@ -77,10 +80,10 @@ router.post(
             name: body.name,
             description: body.description,
             ownerId: userId,
-            maxSize: body.max_size,
             projectIdea: body.project_idea,
             chatRoomId: chatRoom.id,
             source: 'manual',
+            status: 'forming',
             requirements: {
               create: (body.requirements ?? []).map((r: { type: string; name: string; priority: string }) => ({
                 requirementType: r.type,
@@ -96,15 +99,17 @@ router.post(
           data: { teamId: newTeam.id, userId, roleInTeam: 'owner' },
         });
 
+        // Owner moves to in_forming_team (not yet finalized)
         await tx.eventParticipant.update({
           where: { eventId_userId: { eventId: event_id, userId } },
-          data: { status: 'in_finalized_team', teamId: newTeam.id },
+          data: { status: 'in_forming_team', teamId: newTeam.id },
         });
 
         return newTeam;
       });
 
-      res.status(201).json({ team: { ...team, current_size: 1, open_slots: team.maxSize - 1 } });
+      const activeMemberCount = team.members.filter((m) => !m.leftAt).length;
+      res.status(201).json({ team: { ...team, current_size: activeMemberCount } });
     } catch (err) {
       next(err);
     }
@@ -140,7 +145,6 @@ router.get('/:event_id/teams', authenticate, async (req: Request, res: Response,
       return {
         ...t,
         current_size: activeMembers.length,
-        open_slots: t.maxSize - activeMembers.length,
       };
     });
 
@@ -170,7 +174,7 @@ router.get('/:event_id/teams/discover', authenticate, async (req: Request, res: 
     if (mode === 'explore') {
       const enriched = openTeams.map((t) => {
         const activeMembers = t.members.filter((m) => !m.leftAt);
-        return { team: t, current_size: activeMembers.length, open_slots: t.maxSize - activeMembers.length };
+        return { team: t, current_size: activeMembers.length };
       });
       res.json({ data: enriched });
       return;
@@ -208,7 +212,6 @@ router.get('/:event_id/teams/discover', authenticate, async (req: Request, res: 
           matching_skills: matchingSkills,
           matching_roles: matchingRoles,
           current_size: activeMembers.length,
-          open_slots: t.maxSize - activeMembers.length,
         };
       })
       .filter((t) => t.match_score > 0)
@@ -236,7 +239,6 @@ router.get('/:event_id/teams/:team_id', authenticate, async (req: Request, res: 
     res.json({
       ...team,
       current_size: activeMembers.length,
-      open_slots: team.maxSize - activeMembers.length,
     });
   } catch (err) {
     next(err);
@@ -281,6 +283,7 @@ router.put(
 );
 
 // ─── POST /v1/events/:event_id/teams/:team_id/finalize ────────────────────
+// Team completion is ALWAYS explicitly decided by the team (never from member count).
 router.post('/:event_id/teams/:team_id/finalize', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { team_id, event_id } = req.params;
@@ -292,17 +295,37 @@ router.post('/:event_id/teams/:team_id/finalize', authenticate, async (req: Requ
     });
 
     if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+    if (team.status === 'finalized') throw new AppError(409, 'ALREADY_FINALIZED', 'Team is already finalized.');
+    if (team.status === 'dissolved') throw new AppError(409, 'TEAM_DISSOLVED', 'Team has been dissolved.');
 
-    const event = await prisma.event.findUnique({ where: { id: event_id } });
-    if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
-
-    if (team.members.length < event.minTeamSize) {
-      throw new AppError(409, 'TEAM_TOO_SMALL', `Team needs at least ${event.minTeamSize} members to finalize.`);
+    // Team must have at least 1 member (the owner)
+    if (team.members.length < 1) {
+      throw new AppError(409, 'TEAM_EMPTY', 'Cannot finalize an empty team.');
     }
 
-    const updated = await prisma.team.update({
+    await prisma.$transaction(async (tx) => {
+      await tx.team.update({
+        where: { id: team_id },
+        data: { status: 'finalized' },
+      });
+
+      // Update all active members to in_finalized_team
+      for (const member of team.members) {
+        await tx.eventParticipant.update({
+          where: { eventId_userId: { eventId: event_id, userId: member.userId } },
+          data: { status: 'in_finalized_team' },
+        });
+      }
+
+      // Cancel all pending requests for this team (no longer recruiting)
+      await tx.requestInvitation.updateMany({
+        where: { teamId: team_id, status: 'pending' },
+        data: { status: 'cancelled' },
+      });
+    });
+
+    const updated = await prisma.team.findUnique({
       where: { id: team_id },
-      data: { status: 'finalized' },
       include: TEAM_PUBLIC_INCLUDE,
     });
 
@@ -338,6 +361,7 @@ router.post('/:event_id/teams/:team_id/dissolve', authenticate, async (req: Requ
     });
 
     if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+    if (team.status === 'dissolved') throw new AppError(409, 'ALREADY_DISSOLVED', 'Team is already dissolved.');
 
     await prisma.$transaction(async (tx) => {
       await tx.team.update({ where: { id: team_id }, data: { status: 'dissolved' } });
@@ -397,6 +421,11 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
     });
 
     if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+
+    // Cannot leave a finalized team — must use dissolve or be removed
+    if (team.status === 'finalized' && membership.roleInTeam === 'owner') {
+      throw new AppError(409, 'CANNOT_LEAVE_FINALIZED', 'Team owner cannot leave a finalized team. Dissolve the team instead.');
+    }
 
     await prisma.$transaction(async (tx) => {
       await tx.teamMember.update({
@@ -499,15 +528,28 @@ router.delete(
         throw new AppError(403, 'FORBIDDEN', 'Admins can only remove members.');
       }
 
+      const team = await prisma.team.findUnique({ where: { id: team_id } });
+      if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+
       await prisma.$transaction(async (tx) => {
         await tx.teamMember.update({
           where: { teamId_userId: { teamId: team_id, userId: user_id } },
           data: { leftAt: new Date() },
         });
+        // User returns to looking_for_team when removed
         await tx.eventParticipant.update({
           where: { eventId_userId: { eventId: event_id, userId: user_id } },
           data: { status: 'looking_for_team', teamId: null },
         });
+      });
+
+      await sendNotification({
+        userId: user_id,
+        eventId: event_id,
+        type: 'team_member_left',
+        title: `You were removed from team "${team.name}".`,
+        body: 'You are now looking for a team again.',
+        data: { team_id },
       });
 
       res.status(204).send();
@@ -545,9 +587,9 @@ router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Req
 
     if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
 
-    // Load available candidates
+    // Load available candidates (looking for team or in forming teams — can still be invited)
     const availableParticipants = await prisma.eventParticipant.findMany({
-      where: { eventId: event_id, status: 'looking_for_team' },
+      where: { eventId: event_id, status: { in: ['looking_for_team', 'registered'] } },
       include: { user: { include: { skills: true, interests: true, preferredRoles: true } } },
     });
 
@@ -574,8 +616,6 @@ router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Req
     }));
 
     const constraints = {
-      minTeamSize: event.minTeamSize,
-      maxTeamSize: event.maxTeamSize,
       hardSkills: event.requiredSkills.filter((s) => s.constraintType === 'hard').map((s) => s.skillName),
       softSkills: event.requiredSkills.filter((s) => s.constraintType === 'soft').map((s) => s.skillName),
       hardRoles: event.requiredRoles.filter((r) => r.constraintType === 'hard').map((r) => r.roleName),

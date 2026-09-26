@@ -77,7 +77,7 @@ router.get('/:id', authenticate, async (req: Request, res: Response, next: NextF
   }
 });
 
-// ─── POST /v1/events (organizer/admin only) ───────────────────────────────
+// ─── POST /v1/events (admin only) ─────────────────────────────────────────
 router.post(
   '/',
   authenticate,
@@ -87,18 +87,12 @@ router.post(
     try {
       const body = req.body;
 
-      if (body.min_team_size > body.max_team_size) {
-        throw new AppError(400, 'INVALID_TEAM_SIZE', 'min_team_size cannot exceed max_team_size.');
-      }
-
       const event = await prisma.event.create({
         data: {
           organizerId: req.user!.sub,
           name: body.name,
           description: body.description,
           eventType: body.event_type,
-          minTeamSize: body.min_team_size,
-          maxTeamSize: body.max_team_size,
           registrationOpens: body.registration_opens ? new Date(body.registration_opens) : undefined,
           registrationCloses: body.registration_closes ? new Date(body.registration_closes) : undefined,
           eventStarts: body.event_starts ? new Date(body.event_starts) : undefined,
@@ -167,7 +161,7 @@ router.put(
       const allowed: Record<string, string[]> = {
         registered: ['looking_for_team', 'withdrawn'],
         looking_for_team: ['registered', 'withdrawn'],
-        in_finalized_team: ['looking_for_team', 'withdrawn'],  // leave team
+        // in_forming_team and in_finalized_team transitions are handled by team routes
       };
 
       const allowedTransitions = allowed[participant.status] ?? [];

@@ -8,9 +8,11 @@ import { sendNotification } from '../services/notificationService';
 
 const router = Router({ mergeParams: true });
 
-const MATCHMAKING_RATE_LIMIT = redisRateLimit('matchmaking_restart', 3, 60 * 60 * 1000);
+const MATCHMAKING_RATE_LIMIT = redisRateLimit('matchmaking_enter', 5, 60 * 60 * 1000);
 
 // ─── POST /v1/events/:event_id/matchmaking/enter ──────────────────────────
+// Only `looking_for_team` users may enter matchmaking.
+// Prevents concurrent placement into multiple rounds.
 router.post(
   '/:event_id/matchmaking/enter',
   authenticate,
@@ -25,6 +27,8 @@ router.post(
       });
 
       if (!participant) throw new AppError(404, 'NOT_FOUND', 'You are not registered for this event.');
+
+      // Only allow from looking_for_team
       if (participant.status !== 'looking_for_team') {
         throw new AppError(409, 'INVALID_STATE', `Cannot enter matchmaking from state: ${participant.status}.`);
       }
@@ -34,7 +38,7 @@ router.post(
         throw new AppError(409, 'MATCHMAKING_DISABLED', 'Auto-matchmaking is not enabled for this event.');
       }
 
-      // Snapshot profile
+      // Snapshot profile at time of entry
       const user = await prisma.user.findUnique({
         where: { id: userId },
         include: { skills: true, interests: true, preferredRoles: true },
@@ -63,7 +67,7 @@ router.post(
       res.json({
         status: 'in_matchmaking',
         position_in_queue: queueSize + 1,
-        estimated_wait: 'Algorithm runs when sufficient participants join the queue.',
+        estimated_wait: 'Algorithm runs when triggered by the event organizer.',
       });
     } catch (err) {
       next(err);
@@ -116,14 +120,14 @@ router.get('/:event_id/matchmaking/status', authenticate, async (req: Request, r
       your_status: participant.status,
       queue_size: queueSize,
       last_matchmaking_at: participant.lastMatchmakingAt,
-      restarts_this_hour: participant.matchmakingRestarts,
+      restarts_count: participant.matchmakingRestarts,
     });
   } catch (err) {
     next(err);
   }
 });
 
-// ─── POST /v1/events/:event_id/matchmaking/run (organizer) ────────────────
+// ─── POST /v1/events/:event_id/matchmaking/run (organizer/admin) ──────────
 router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { event_id } = req.params;
@@ -140,8 +144,9 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
       where: { eventId: event_id, status: 'in_matchmaking' },
     });
 
-    if (poolSize < event.minTeamSize) {
-      throw new AppError(409, 'INSUFFICIENT_PARTICIPANTS', `Need at least ${event.minTeamSize} participants in the queue.`);
+    // Need at least 2 participants to form any meaningful team
+    if (poolSize < 2) {
+      throw new AppError(409, 'INSUFFICIENT_PARTICIPANTS', 'Need at least 2 participants in the queue to run matchmaking.');
     }
 
     const weights: MatchWeights = req.body?.weights
@@ -155,13 +160,13 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
         }
       : DEFAULT_WEIGHTS;
 
-    // Run asynchronously — respond immediately with round ID
+    // Create round record first (runs async)
     const round = await prisma.matchingRound.create({
       data: { eventId: event_id, status: 'running', participantsCount: poolSize, algorithmParams: weights as object },
     });
 
-    // Fire and forget — notify when done
-    runAutoMatch(event_id, weights)
+    // Fire and forget — respond immediately with round ID
+    runAutoMatch(event_id, round.id, weights)
       .then(async (result) => {
         // Notify all users placed in provisional teams
         const provisionalTeams = await prisma.provisionalTeam.findMany({
@@ -175,7 +180,7 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
               userId: member.userId,
               eventId: event_id,
               type: 'match_proposed',
-              title: 'You\'ve been matched with a team!',
+              title: "You've been matched with a team!",
               body: 'Review your provisional team and accept or decline.',
               data: { provisional_team_id: pt.id },
             });
@@ -194,7 +199,7 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
           });
         }
       })
-      .catch((err) => console.error('[matchmaking] Error:', err));
+      .catch((err) => console.error('[matchmaking] Error running auto-match:', err));
 
     res.status(202).json({
       round_id: round.id,
