@@ -503,7 +503,8 @@ const MIN_MARGINAL_GAIN_TO_ADD = 0.02;
 export async function runAutoMatch(
   eventId: string,
   roundId: string,
-  weights: MatchWeights = DEFAULT_WEIGHTS
+  weights: MatchWeights = DEFAULT_WEIGHTS,
+  participantIds?: string[]
 ): Promise<{
   roundId: string;
   teamsFormed: number;
@@ -524,7 +525,11 @@ export async function runAutoMatch(
 
   // 2. Load matchmaking pool — only users currently in_matchmaking
   const participants = await prisma.eventParticipant.findMany({
-    where: { eventId, status: 'in_matchmaking' },
+    where: {
+      eventId,
+      status: 'in_matchmaking',
+      ...(participantIds?.length ? { userId: { in: participantIds } } : {}),
+    },
     include: {
       user: {
         include: { skills: true, interests: true, preferredRoles: true },
