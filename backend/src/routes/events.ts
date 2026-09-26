@@ -4,6 +4,8 @@ import { authenticate, requireAdmin } from '../middleware/auth';
 import { validate, createEventSchema, updateParticipationSchema } from '../lib/validation';
 import { AppError } from '../middleware/errorHandler';
 import { sendNotification } from '../services/notificationService';
+import { normalizeRole, normalizeSkill } from '../lib/normalize';
+import { assertEventIsActive, assertEventRegistrationOpen } from '../lib/eventLifecycle';
 
 const router = Router();
 
@@ -100,13 +102,13 @@ router.post(
           matchmakingEnabled: body.matchmaking_enabled,
           requiredSkills: {
             create: (body.required_skills ?? []).map((s: { skill_name: string; constraint_type: 'hard' | 'soft' }) => ({
-              skillName: s.skill_name,
+              skillName: normalizeSkill(s.skill_name),
               constraintType: s.constraint_type,
             })),
           },
           requiredRoles: {
             create: (body.required_roles ?? []).map((r: { role_name: string; constraint_type: 'hard' | 'soft' }) => ({
-              roleName: r.role_name,
+              roleName: normalizeRole(r.role_name),
               constraintType: r.constraint_type,
             })),
           },
@@ -126,15 +128,42 @@ router.post('/:id/register', authenticate, async (req: Request, res: Response, n
   try {
     const event = await prisma.event.findUnique({ where: { id: req.params.id } });
     if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
-    if (event.status !== 'registration_open') {
-      throw new AppError(409, 'REGISTRATION_CLOSED', 'Event registration is not open.');
-    }
+    assertEventRegistrationOpen(event.status);
 
     const participant = await prisma.eventParticipant.create({
       data: { eventId: event.id, userId: req.user!.sub },
     });
 
     res.status(201).json({ participant });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /v1/events/:id/participation/me ─────────────────────────────────
+router.get('/:id/participation/me', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const participation = await prisma.eventParticipant.findUnique({
+      where: { eventId_userId: { eventId: req.params.id, userId: req.user!.sub } },
+      include: {
+        team: { select: { id: true, name: true, status: true } },
+        provisionalTeam: { select: { id: true, status: true, expiresAt: true } },
+      },
+    });
+
+    if (!participation) {
+      res.json({ registered: false });
+      return;
+    }
+
+    res.json({
+      registered: true,
+      status: participation.status,
+      team: participation.team,
+      provisional_team: participation.provisionalTeam,
+      matchmaking_restarts: participation.matchmakingRestarts,
+      last_matchmaking_at: participation.lastMatchmakingAt,
+    });
   } catch (err) {
     next(err);
   }
@@ -150,6 +179,10 @@ router.put(
       const { status } = req.body;
       const userId = req.user!.sub;
       const eventId = req.params.id;
+
+      const event = await prisma.event.findUnique({ where: { id: eventId } });
+      if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
+      assertEventIsActive(event.status);
 
       const participant = await prisma.eventParticipant.findUnique({
         where: { eventId_userId: { eventId, userId } },

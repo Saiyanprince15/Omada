@@ -495,14 +495,16 @@ function buildMemberExplanation(
 // Main Auto-Match Entry Point
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Default target group size — groups of ~4 work well for hackathons.
-// With no fixed team-size rules, this is just a heuristic target.
-const DEFAULT_TARGET_GROUP_SIZE = 4;
+// Auto-match does not impose a minimum, maximum, or target team size.
+// Teams grow only when adding another candidate improves the composition or
+// contributes a currently-missing hard requirement.
+const MIN_MARGINAL_GAIN_TO_ADD = 0.02;
 
 export async function runAutoMatch(
   eventId: string,
   roundId: string,
-  weights: MatchWeights = DEFAULT_WEIGHTS
+  weights: MatchWeights = DEFAULT_WEIGHTS,
+  participantIds?: string[]
 ): Promise<{
   roundId: string;
   teamsFormed: number;
@@ -523,7 +525,11 @@ export async function runAutoMatch(
 
   // 2. Load matchmaking pool — only users currently in_matchmaking
   const participants = await prisma.eventParticipant.findMany({
-    where: { eventId, status: 'in_matchmaking' },
+    where: {
+      eventId,
+      status: 'in_matchmaking',
+      ...(participantIds?.length ? { userId: { in: participantIds } } : {}),
+    },
     include: {
       user: {
         include: { skills: true, interests: true, preferredRoles: true },
@@ -549,15 +555,6 @@ export async function runAutoMatch(
     matchmakingRestarts: p.matchmakingRestarts,
   }));
 
-  if (pool.length < 2) {
-    // Not enough to form any team
-    await prisma.matchingRound.update({
-      where: { id: roundId },
-      data: { status: 'completed', teamsFormed: 0, unmatchedCount: pool.length, completedAt: new Date() },
-    });
-    return { roundId, teamsFormed: 0, unmatched: pool.map((u) => u.userId) };
-  }
-
   // 3. Precompute global metrics
   const poolUniqueSkills = new Set(pool.flatMap((u) => u.skills.map((s) => s.skillName))).size;
   const globalExpAvg =
@@ -565,50 +562,61 @@ export async function runAutoMatch(
       ? 0.5
       : pool.reduce((sum, u) => sum + experienceScore(u), 0) / pool.length;
 
-  // Target group size: use default heuristic; number of groups = floor(pool / target)
-  const targetGroupSize = DEFAULT_TARGET_GROUP_SIZE;
-  const k = Math.max(1, Math.floor(pool.length / targetGroupSize));
+  // 4. Compatibility-driven greedy grouping.
+  // Start a new cluster from each unassigned seed. A cluster grows only while
+  // there is a meaningful positive marginal contribution or a candidate fills
+  // a hard requirement. This yields variable-size teams without encoding a
+  // product-level team-size target.
+  const unassigned = new Set(pool.map((u) => u.userId));
+  const teams: TeamComposition[] = [];
 
-  // 4. Seed selection (k-means++)
-  const seeds = selectSeeds(pool, k);
-  const teams: TeamComposition[] = seeds.map((seed) => ({ members: [seed] }));
+  while (unassigned.size > 0) {
+    const seed = pool.find((u) => unassigned.has(u.userId))!;
+    const team: TeamComposition = { members: [seed] };
+    unassigned.delete(seed.userId);
 
-  // 5. Greedy assignment — round-robin across teams, picking best marginal contributor
-  const assigned = new Set(seeds.map((s) => s.userId));
-  const remaining = pool.filter((u) => !assigned.has(u.userId));
-
-  let roundIndex = 0;
-  while (remaining.length > 0) {
-    const teamIndex = roundIndex % teams.length;
-    const team = teams[teamIndex]!;
-
-    // Find best candidate for this team
-    let bestCandidate: UserProfile | null = null;
-    let bestMC = -Infinity;
-
-    for (const candidate of remaining) {
-      if (assigned.has(candidate.userId)) continue;
-
-      const mc = marginalContribution(
-        candidate, team, constraints, poolUniqueSkills, globalExpAvg, weights
+    while (unassigned.size > 0) {
+      const remaining = pool.filter((u) => unassigned.has(u.userId));
+      const missingHardSkills = constraints.hardSkills.filter(
+        (skill) => !team.members.some((m) => m.skills.some((s) => s.skillName === skill))
+      );
+      const missingHardRoles = constraints.hardRoles.filter(
+        (role) => !team.members.some((m) => m.preferredRoles.some((r) => r.roleName === role))
       );
 
-      if (mc > bestMC) {
-        bestMC = mc;
-        bestCandidate = candidate;
+      const scored = remaining.map((candidate) => {
+        const fillsHard = candidate.skills.some((s) => missingHardSkills.includes(s.skillName)) ||
+          candidate.preferredRoles.some((r) => missingHardRoles.includes(r.roleName));
+        const mc = marginalContribution(
+          candidate, team, constraints, poolUniqueSkills, globalExpAvg, weights
+        );
+        return { candidate, mc, fillsHard };
+      }).sort((a, b) => Number(b.fillsHard) - Number(a.fillsHard) || b.mc - a.mc);
+
+      const best = scored[0];
+      if (!best) break;
+
+      const stillHasHard = missingHardSkills.length > 0 || missingHardRoles.length > 0;
+      if (!best.fillsHard && best.mc < MIN_MARGINAL_GAIN_TO_ADD) break;
+
+      team.members.push(best.candidate);
+      unassigned.delete(best.candidate.userId);
+
+      if (stillHasHard) {
+        const hardSkillsRemaining = constraints.hardSkills.some(
+          (skill) => !team.members.some((m) => m.skills.some((s) => s.skillName === skill))
+        );
+        const hardRolesRemaining = constraints.hardRoles.some(
+          (role) => !team.members.some((m) => m.preferredRoles.some((r) => r.roleName === role))
+        );
+        if (!hardSkillsRemaining && !hardRolesRemaining) {
+          // Once hard constraints are satisfied, continue only when another
+          // addition is actually useful.
+        }
       }
     }
 
-    if (bestCandidate) {
-      team.members.push(bestCandidate);
-      assigned.add(bestCandidate.userId);
-      remaining.splice(remaining.findIndex((u) => u.userId === bestCandidate!.userId), 1);
-    }
-
-    roundIndex++;
-
-    // Safety: if we've gone through all teams and can't assign anyone, break
-    if (roundIndex > teams.length * pool.length) break;
+    teams.push(team);
   }
 
   // 6. Fairness pass — swap to reduce score gap between teams
@@ -669,31 +677,41 @@ export async function runAutoMatch(
     if (!swapped) break;
   }
 
-  // 7. Handle remainders — solo users or very small groups
-  // Without a fixed minimum, teams of 1 are not valid provisional teams.
-  // Teams with 2+ members are kept; solo members are unmatched.
-  const unmatchedUserIds: string[] = [];
-  const finalTeams = teams.filter((t) => t.members.length >= 2);
-  const tooSmall = teams.filter((t) => t.members.length < 2 && t.members.length > 0);
+  // 7. Enforce hard constraints before anything is persisted.
+  // There is no minimum or maximum team size. If a tentative team cannot
+  // satisfy the hard requirements, merge its members into valid teams because
+  // adding members cannot remove an already-covered hard requirement.
+  let finalTeams = teams.filter((t) => satisfiesHardConstraints(t, constraints));
+  const invalidTeams = teams.filter((t) => !satisfiesHardConstraints(t, constraints));
+  const displacedMembers = invalidTeams.flatMap((t) => t.members);
 
-  for (const smallTeam of tooSmall) {
-    for (const member of smallTeam.members) {
-      // Try to add to existing teams
-      let added = false;
-      for (const team of finalTeams) {
-        // No upper cap — add to team with lowest score (most benefit from another member)
-        const scores = finalTeams.map((t) =>
-          computeTeamScore(t, constraints, poolUniqueSkills, globalExpAvg, weights).total
-        );
-        const lowestScoreIdx = scores.indexOf(Math.min(...scores));
-        const targetTeam = finalTeams[lowestScoreIdx]!;
-        targetTeam.members.push(member);
-        added = true;
-        break;
-      }
-      if (!added) unmatchedUserIds.push(member.userId);
+  if (finalTeams.length === 0 && displacedMembers.length > 0) {
+    const wholePool: TeamComposition = { members: pool };
+    if (satisfiesHardConstraints(wholePool, constraints)) {
+      finalTeams = [wholePool];
+      displacedMembers.length = 0;
     }
   }
+
+  for (const member of displacedMembers) {
+    if (finalTeams.length === 0) break;
+
+    const target = finalTeams.reduce((best, candidate) => {
+      const bestScore = computeTeamScore(best, constraints, poolUniqueSkills, globalExpAvg, weights).total;
+      const candidateScore = computeTeamScore(candidate, constraints, poolUniqueSkills, globalExpAvg, weights).total;
+      return candidateScore < bestScore ? candidate : best;
+    }, finalTeams[0]!);
+
+    target.members.push(member);
+  }
+
+  // A candidate is unmatched only when no resulting team can satisfy the
+  // event's hard requirements. With no hard requirements, even a one-person
+  // provisional team is valid.
+  const finalAssigned = new Set(finalTeams.flatMap((t) => t.members.map((m) => m.userId)));
+  const unmatchedUserIds = pool
+    .filter((u) => !finalAssigned.has(u.userId))
+    .map((u) => u.userId);
 
   // 8. Persist provisional teams
   const expiresAt = new Date(Date.now() + event.autoMatchTimeoutHrs * 60 * 60 * 1000);

@@ -16,6 +16,7 @@ Tracks a user's availability **within a specific event**. A user can have differ
 | `looking_for_team` | User is actively available for manual discovery and auto-matchmaking. |
 | `in_matchmaking` | User is currently being processed by the auto-match algorithm. Transient state. |
 | `in_provisional_team` | User has been placed in a provisional group pending acceptance. |
+| `in_forming_team` | User is in a forming team that has not yet been finalized. |
 | `in_finalized_team` | User is a confirmed member of a permanent team. |
 | `withdrawn` | User has left the event entirely. |
 
@@ -37,12 +38,13 @@ stateDiagram-v2
     in_matchmaking --> looking_for_team : No match found / timeout
     in_matchmaking --> withdrawn : Leave event
 
-    in_provisional_team --> in_finalized_team : All members accept → team finalizes
+    in_provisional_team --> in_forming_team : All members accept → forming team created
     in_provisional_team --> looking_for_team : User rejects / team dissolves
     in_provisional_team --> withdrawn : Leave event
 
-    in_finalized_team --> looking_for_team : Leave team (if event allows re-entry)
-    in_finalized_team --> withdrawn : Leave event
+    in_forming_team --> in_finalized_team : Owner explicitly finalizes
+    in_forming_team --> looking_for_team : Team dissolves / user leaves
+    in_finalized_team --> withdrawn : Event/team policy allows leaving
 
     withdrawn --> registered : Re-register (if event allows)
 ```
@@ -55,15 +57,16 @@ stateDiagram-v2
 | `registered` | `withdrawn` | User leaves event | — |
 | `looking_for_team` | `in_matchmaking` | User opts into auto-match | Matchmaking is enabled for event; restart rate-limit not exceeded |
 | `looking_for_team` | `in_provisional_team` | Algorithm places user in provisional team | — |
-| `looking_for_team` | `in_finalized_team` | User accepts team invite OR team accepts join request | Team has available slot (atomic check) |
+| `looking_for_team` | `in_forming_team` | User accepts team invite OR team accepts join request | Team is forming; availability transition is atomic |
 | `looking_for_team` | `withdrawn` | User leaves event | Cancel all pending requests |
 | `in_matchmaking` | `in_provisional_team` | Algorithm completes, user assigned | — |
 | `in_matchmaking` | `looking_for_team` | No valid team found; algorithm round ends | — |
 | `in_matchmaking` | `withdrawn` | User cancels during processing | Remove from matchmaking pool |
-| `in_provisional_team` | `in_finalized_team` | All provisional members accept | Atomic transition for all members simultaneously |
+| `in_provisional_team` | `in_forming_team` | All provisional members accept | Atomic conversion; provisional chat is archived |
 | `in_provisional_team` | `looking_for_team` | User rejects; OR provisional team dissolves; OR provisional team expires | Clear provisional_team_id |
 | `in_provisional_team` | `withdrawn` | User leaves event | Mark as 'left' in provisional_team_members |
-| `in_finalized_team` | `looking_for_team` | User voluntarily leaves team | Team must remain viable (≥ min_size) or the event allows mid-event departures |
+| `in_forming_team` | `looking_for_team` | User leaves forming team | Forming team remains valid or dissolves if empty |
+| `in_forming_team` | `in_finalized_team` | Owner finalizes | Creates permanent team workspace |
 | `in_finalized_team` | `withdrawn` | User leaves event | Remove from team_members |
 | `withdrawn` | `registered` | User re-registers | Event allows re-registration |
 
@@ -103,9 +106,9 @@ stateDiagram-v2
 | From | To | Trigger | Guards |
 |---|---|---|---|
 | `[*]` | `forming` | User creates team | User is a participant in the event; user is `looking_for_team` or `registered` |
-| `forming` | `finalized` | Owner clicks "Finalize" OR all provisional members accept | `current_members ≥ event.min_team_size` |
+| `forming` | `finalized` | Owner clicks "Finalize" | Owner explicitly decides completion; at least one active member |
 | `forming` | `dissolved` | Owner dissolves OR last member leaves | Return all members to `looking_for_team` |
-| `finalized` | `forming` | Owner re-opens | `current_members < event.max_team_size` AND event not started |
+| `finalized` | `forming` | — | Re-opening is not currently exposed by the participant API |
 | `finalized` | `locked` | Event starts | System-triggered; no user action required |
 | `finalized` | `dissolved` | Owner dissolves | Return all members to appropriate state |
 | `locked` | `dissolved` | Admin/organizer force-dissolves | Emergency action only |
@@ -146,7 +149,7 @@ stateDiagram-v2
 | `pending` | `pending` (internal) | A member rejects → system searches for replacement | Replacement found in available pool |
 | `pending` | `dissolved` | A member rejects AND no replacement found AND remaining < min_size | Return remaining to `looking_for_team` |
 | `pending` | `expired` | `expires_at` reached | Return all pending/accepted members to `looking_for_team` |
-| `accepted` | `converted` | System creates finalized team + members | Atomic creation of team + team_members rows |
+| `accepted` | `converted` | System converts accepted match | Atomic creation of a forming team; provisional chat is archived |
 
 ### Member Replacement Flow
 
@@ -253,10 +256,10 @@ The system automatically cancels pending requests/invitations when their precond
 
 These invariants must hold at all times. Violation indicates a bug:
 
-1. **Single-team rule:** A user in `in_finalized_team` state has exactly one active `team_members` row (where `left_at IS NULL`) within that event.
-2. **Single-provisional rule:** A user in `in_provisional_team` state has exactly one active `provisional_team_members` row (where `status IN ('pending', 'accepted')`) within that event.
-3. **No orphans:** A user whose team dissolves is always returned to `looking_for_team` (or `withdrawn` if they chose to leave).
-4. **No phantom slots:** `team_members` count (where `left_at IS NULL`) never exceeds `teams.max_size`.
-5. **Consistent participant state:** `event_participants.team_id` is non-NULL if and only if `status = 'in_finalized_team'`.
+1. **Single-team rule:** A user in `in_forming_team` or `in_finalized_team` has exactly one active `team_members` row within that event.
+2. **Single-provisional rule:** A user in `in_provisional_team` has exactly one active `provisional_team_members` row with status `pending` or `accepted`.
+3. **No orphans:** A dissolved/expired team always returns affected users to `looking_for_team`.
+4. **No size invariant:** Omada deliberately has no minimum, maximum, or target team size.
+5. **Consistent participant state:** `event_participants.team_id` is non-NULL for users in `in_forming_team` or `in_finalized_team`.
 6. **Consistent provisional state:** `event_participants.provisional_team_id` is non-NULL if and only if `status = 'in_provisional_team'`.
 7. **No pending after resolution:** Once a request transitions out of `pending`, it never transitions back.

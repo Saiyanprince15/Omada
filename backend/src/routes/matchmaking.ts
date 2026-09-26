@@ -5,10 +5,103 @@ import { AppError } from '../middleware/errorHandler';
 import { runAutoMatch, DEFAULT_WEIGHTS, MatchWeights } from '../services/matchingEngine';
 import { redisRateLimit } from '../middleware/rateLimiter';
 import { sendNotification } from '../services/notificationService';
+import { assertEventMatchmakingOpen } from '../lib/eventLifecycle';
 
 const router = Router({ mergeParams: true });
 
 const MATCHMAKING_RATE_LIMIT = redisRateLimit('matchmaking_enter', 5, 60 * 60 * 1000);
+
+async function launchMatchmaking(eventId: string, weights: MatchWeights = DEFAULT_WEIGHTS) {
+  const round = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
+
+    const activeRound = await tx.matchingRound.findFirst({
+      where: { eventId, status: 'running' },
+      orderBy: { startedAt: 'desc' },
+    });
+
+    if (activeRound) {
+      const stale = Date.now() - activeRound.startedAt.getTime() > 30 * 60 * 1000;
+      if (!stale) return null;
+      await tx.matchingRound.update({
+        where: { id: activeRound.id },
+        data: { status: 'failed', completedAt: new Date() },
+      });
+    }
+
+    const queued = await tx.eventParticipant.findMany({
+      where: { eventId, status: 'in_matchmaking' },
+      select: { userId: true },
+      orderBy: { registeredAt: 'asc' },
+    });
+
+    // Avoid proposing a one-person auto-match. This is only a queue-start
+    // threshold, not a product-level team-size rule.
+    if (queued.length < 2) return null;
+
+    const round = await tx.matchingRound.create({
+      data: {
+        eventId,
+        status: 'running',
+        participantsCount: queued.length,
+        algorithmParams: weights as object,
+      },
+    });
+
+    return { round, participantIds: queued.map((p) => p.userId) };
+  });
+
+  if (!round) return null;
+
+  runAutoMatch(eventId, round.round.id, weights, round.participantIds)
+    .then(async (result) => {
+      const provisionalTeams = await prisma.provisionalTeam.findMany({
+        where: { eventId, createdByRound: result.roundId },
+        include: { members: true },
+      });
+
+      for (const pt of provisionalTeams) {
+        for (const member of pt.members) {
+          await sendNotification({
+            userId: member.userId,
+            eventId,
+            type: 'match_proposed',
+            title: "You've been matched with a team!",
+            body: 'Review your provisional team and accept or decline.',
+            data: { provisional_team_id: pt.id, event_id: eventId },
+          });
+        }
+      }
+
+      for (const unmatchedUserId of result.unmatched) {
+        await sendNotification({
+          userId: unmatchedUserId,
+          eventId,
+          type: 'match_proposed',
+          title: 'Matchmaking update',
+          body: 'Not enough compatible participants were available for automatic matching. You remain in the discovery pool.',
+          data: { round_id: result.roundId, event_id: eventId },
+        });
+      }
+
+      // Pick up anyone who joined the queue after this round's snapshot.
+      const queuedAfterRound = await prisma.eventParticipant.count({
+        where: { eventId, status: 'in_matchmaking' },
+      });
+      if (queuedAfterRound >= 2) {
+        void launchMatchmaking(eventId);
+      }
+    })
+    .catch(async (err) => {
+      console.error('[matchmaking] Error running auto-match:', err);
+      await prisma.matchingRound.update({
+        where: { id: round.round.id },
+        data: { status: 'failed', completedAt: new Date() },
+      }).catch((updateErr) => console.error('[matchmaking] Failed to mark round failed:', updateErr));
+    });
+
+  return round.round;
+}
 
 // ─── POST /v1/events/:event_id/matchmaking/enter ──────────────────────────
 // Only `looking_for_team` users may enter matchmaking.
@@ -37,6 +130,7 @@ router.post(
       if (!event || !event.matchmakingEnabled) {
         throw new AppError(409, 'MATCHMAKING_DISABLED', 'Auto-matchmaking is not enabled for this event.');
       }
+      assertEventMatchmakingOpen(event.status);
 
       // Snapshot profile at time of entry
       const user = await prisma.user.findUnique({
@@ -50,10 +144,6 @@ router.post(
         preferredRoles: user?.preferredRoles ?? [],
       };
 
-      const queueSize = await prisma.eventParticipant.count({
-        where: { eventId: event_id, status: 'in_matchmaking' },
-      });
-
       await prisma.eventParticipant.update({
         where: { eventId_userId: { eventId: event_id, userId } },
         data: {
@@ -64,10 +154,18 @@ router.post(
         },
       });
 
+      const queueSizeAfterJoin = await prisma.eventParticipant.count({
+        where: { eventId: event_id, status: 'in_matchmaking' },
+      });
+
+      void launchMatchmaking(event_id);
+
       res.json({
         status: 'in_matchmaking',
-        position_in_queue: queueSize + 1,
-        estimated_wait: 'Algorithm runs when triggered by the event organizer.',
+        position_in_queue: queueSizeAfterJoin,
+        estimated_wait: queueSizeAfterJoin >= 2
+          ? 'Auto-match is being prepared.'
+          : 'Waiting for another participant to join auto-match.',
       });
     } catch (err) {
       next(err);
@@ -140,14 +238,6 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
       throw new AppError(403, 'FORBIDDEN', 'Only the event organizer can trigger matchmaking.');
     }
 
-    const poolSize = await prisma.eventParticipant.count({
-      where: { eventId: event_id, status: 'in_matchmaking' },
-    });
-
-    // Need at least 2 participants to form any meaningful team
-    if (poolSize < 2) {
-      throw new AppError(409, 'INSUFFICIENT_PARTICIPANTS', 'Need at least 2 participants in the queue to run matchmaking.');
-    }
 
     const weights: MatchWeights = req.body?.weights
       ? {
@@ -160,51 +250,15 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
         }
       : DEFAULT_WEIGHTS;
 
-    // Create round record first (runs async)
-    const round = await prisma.matchingRound.create({
-      data: { eventId: event_id, status: 'running', participantsCount: poolSize, algorithmParams: weights as object },
-    });
-
-    // Fire and forget — respond immediately with round ID
-    runAutoMatch(event_id, round.id, weights)
-      .then(async (result) => {
-        // Notify all users placed in provisional teams
-        const provisionalTeams = await prisma.provisionalTeam.findMany({
-          where: { eventId: event_id, createdByRound: result.roundId },
-          include: { members: true },
-        });
-
-        for (const pt of provisionalTeams) {
-          for (const member of pt.members) {
-            await sendNotification({
-              userId: member.userId,
-              eventId: event_id,
-              type: 'match_proposed',
-              title: "You've been matched with a team!",
-              body: 'Review your provisional team and accept or decline.',
-              data: { provisional_team_id: pt.id },
-            });
-          }
-        }
-
-        // Notify unmatched users
-        for (const unmatchedUserId of result.unmatched) {
-          await sendNotification({
-            userId: unmatchedUserId,
-            eventId: event_id,
-            type: 'match_proposed',
-            title: 'Matchmaking update',
-            body: 'Not enough participants were available for automatic matching. You remain in the discovery pool.',
-            data: { round_id: result.roundId },
-          });
-        }
-      })
-      .catch((err) => console.error('[matchmaking] Error running auto-match:', err));
+    const round = await launchMatchmaking(event_id, weights);
+    if (!round) {
+      throw new AppError(409, 'MATCHMAKING_ALREADY_RUNNING', 'Matchmaking is already running or not enough participants are queued.');
+    }
 
     res.status(202).json({
       round_id: round.id,
       status: 'running',
-      participants_count: poolSize,
+      participants_count: round.participantsCount,
     });
   } catch (err) {
     next(err);

@@ -194,7 +194,7 @@ router.get('/search', authenticate, async (req: Request, res: Response, next: Ne
         eventParticipations: {
           some: {
             eventId: event_id,
-            status: 'looking_for_team',
+            status: { in: ['registered', 'looking_for_team'] },
           },
         },
       };

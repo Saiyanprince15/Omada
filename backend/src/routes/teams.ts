@@ -6,6 +6,7 @@ import { AppError } from '../middleware/errorHandler';
 import { sendNotification } from '../services/notificationService';
 import { rankCandidates, DEFAULT_WEIGHTS } from '../services/matchingEngine';
 import { normalizeSkill, normalizeRole } from '../lib/normalize';
+import { assertEventFormationOpen, assertEventIsActive } from '../lib/eventLifecycle';
 import { broadcastTeamUpdate } from '../socket';
 
 const router = Router({ mergeParams: true });
@@ -74,7 +75,7 @@ function requireMutableTeam(team: { status: string }, allowedStatuses: string[] 
 // ─── POST /v1/events/:event_id/teams ──────────────────────────────────────
 // Creates a manual team. Owner is placed into `in_forming_team` state.
 // Team completion must be explicitly decided (finalize endpoint).
-// Chat room is NOT created here — only a provisional workspace is created.
+// No persistent workspace is created here. Finalized teams receive a permanent chat.
 // The permanent team chat room is created at finalization time (fix #10).
 router.post(
   '/:event_id/teams',
@@ -85,27 +86,30 @@ router.post(
       const { event_id } = req.params;
       const userId = req.user!.sub;
 
-      const participant = await prisma.eventParticipant.findUnique({
-        where: { eventId_userId: { eventId: event_id, userId } },
-      });
-
-      if (!participant) throw new AppError(403, 'NOT_REGISTERED', 'You must register for the event first.');
-
-      // Only allow team creation from states where the user is available
-      const allowedStates = ['registered', 'looking_for_team'];
-      if (!allowedStates.includes(participant.status)) {
-        throw new AppError(409, 'INVALID_STATE', `Cannot create a team from state: ${participant.status}.`);
-      }
-
       const event = await prisma.event.findUnique({ where: { id: event_id } });
       if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
+      assertEventFormationOpen(event.status);
 
       const body = req.body;
 
       const team = await prisma.$transaction(async (tx) => {
-        // Create a provisional chat room for the forming team (not permanent yet — fix #10)
-        const chatRoom = await tx.chatRoom.create({ data: { roomType: 'provisional' } });
+        // Serialize team creation per event/user so concurrent requests
+        // cannot both observe the participant as available.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${event_id} || ':' || ${userId}))`;
 
+        const participant = await tx.eventParticipant.findUnique({
+          where: { eventId_userId: { eventId: event_id, userId } },
+        });
+
+        if (!participant) throw new AppError(403, 'NOT_REGISTERED', 'You must register for the event first.');
+
+        const allowedStates = ['registered', 'looking_for_team'];
+        if (!allowedStates.includes(participant.status)) {
+          throw new AppError(409, 'INVALID_STATE', `Cannot create a team from state: ${participant.status}.`);
+        }
+
+        // Manual forming teams do not receive a persistent chat yet.
+        // A permanent workspace is created only when the team is finalized.
         const newTeam = await tx.team.create({
           data: {
             eventId: event_id,
@@ -113,7 +117,7 @@ router.post(
             description: body.description,
             ownerId: userId,
             projectIdea: body.project_idea,
-            chatRoomId: chatRoom.id,
+            chatRoomId: null,
             source: 'manual',
             status: 'forming',
             requirements: {
@@ -352,6 +356,30 @@ router.post('/:event_id/teams/:team_id/finalize', authenticate, async (req: Requ
     }
 
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${team_id}))`;
+
+      const currentTeam = await tx.team.findUnique({
+        where: { id: team_id },
+        include: { members: { where: { leftAt: null } } },
+      });
+
+      if (!currentTeam || currentTeam.eventId !== event_id) {
+        throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+      }
+      if (currentTeam.ownerId !== req.user!.sub ||
+          !currentTeam.members.some((member) => member.userId === req.user!.sub && member.leftAt === null)) {
+        throw new AppError(403, 'FORBIDDEN', 'You are no longer the owner of this team.');
+      }
+      if (currentTeam.status === 'finalized') {
+        throw new AppError(409, 'ALREADY_FINALIZED', 'Team is already finalized.');
+      }
+      if (currentTeam.status === 'dissolved') {
+        throw new AppError(409, 'TEAM_DISSOLVED', 'Team has been dissolved.');
+      }
+      if (currentTeam.members.length < 1) {
+        throw new AppError(409, 'TEAM_EMPTY', 'Cannot finalize an empty team.');
+      }
+
       // Fix #10: Create the permanent team chat room at finalization
       const permanentChatRoom = await tx.chatRoom.create({ data: { roomType: 'permanent' } });
 
@@ -421,6 +449,9 @@ router.post('/:event_id/teams/:team_id/dissolve', authenticate, async (req: Requ
     });
 
     if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+    if (team.status === 'finalized' || team.status === 'locked') {
+      throw new AppError(409, 'TEAM_FINALIZED', 'Cannot dissolve a finalized or locked team.');
+    }
     if (team.status === 'dissolved') throw new AppError(409, 'ALREADY_DISSOLVED', 'Team is already dissolved.');
 
     await prisma.$transaction(async (tx) => {
@@ -491,6 +522,21 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
     if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
 
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${team_id}))`;
+
+      const currentTeam = await tx.team.findUnique({
+        where: { id: team_id },
+        include: { members: { where: { leftAt: null } } },
+      });
+      if (!currentTeam || currentTeam.eventId !== event_id) {
+        throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+      }
+
+      const currentMembership = currentTeam.members.find((member) => member.userId === userId);
+      if (!currentMembership) {
+        throw new AppError(404, 'NOT_FOUND', 'You are not an active team member.');
+      }
+
       await tx.teamMember.update({
         where: { teamId_userId: { teamId: team_id, userId } },
         data: { leftAt: new Date() },
@@ -501,15 +547,18 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
         data: { status: 'looking_for_team', teamId: null },
       });
 
-      const remainingMembers = team.members.filter((m) => m.userId !== userId && !m.leftAt);
+      const remainingMembers = currentTeam.members.filter((m) => m.userId !== userId && !m.leftAt);
 
       if (remainingMembers.length === 0) {
-        // Dissolve if no members left
         await tx.team.update({ where: { id: team_id }, data: { status: 'dissolved' } });
-      } else if (membership.roleInTeam === 'owner') {
+      } else if (currentMembership.roleInTeam === 'owner') {
         // Auto-transfer ownership to longest-tenured member
         const newOwner = remainingMembers.sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime())[0]!;
         await tx.team.update({ where: { id: team_id }, data: { ownerId: newOwner.userId } });
+        await tx.teamMember.update({
+          where: { teamId_userId: { teamId: team_id, userId } },
+          data: { roleInTeam: 'member' },
+        });
         await tx.teamMember.update({
           where: { teamId_userId: { teamId: team_id, userId: newOwner.userId } },
           data: { roleInTeam: 'owner' },
@@ -638,6 +687,7 @@ router.delete(
 router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { team_id, event_id } = req.params;
+    const { q } = req.query as Record<string, string>;
 
     // Fix #2: cross-event auth
     const teamRecord = await requireTeamInEvent(team_id, event_id);
@@ -671,7 +721,13 @@ router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Req
 
     // Load available candidates (looking for team or registered — can still be invited)
     const availableParticipants = await prisma.eventParticipant.findMany({
-      where: { eventId: event_id, status: { in: ['looking_for_team', 'registered'] } },
+      where: {
+        eventId: event_id,
+        status: { in: ['looking_for_team', 'registered'] },
+        ...(q?.trim()
+          ? { user: { displayName: { contains: q.trim(), mode: 'insensitive' } } }
+          : {}),
+      },
       include: { user: { include: { skills: true, interests: true, preferredRoles: true } } },
     });
 
