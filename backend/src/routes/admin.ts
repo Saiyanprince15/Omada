@@ -146,8 +146,8 @@ router.delete('/events/:event_id/teams/:team_id', authenticate, async (req: Requ
       throw new AppError(403, 'FORBIDDEN', 'Organizer access required.');
     }
 
-    const team = await prisma.team.findUnique({
-      where: { id: team_id },
+    const team = await prisma.team.findFirst({
+      where: { id: team_id, eventId: event_id },
       include: { members: { where: { leftAt: null } } },
     });
 
