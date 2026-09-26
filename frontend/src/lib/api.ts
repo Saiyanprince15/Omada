@@ -202,9 +202,10 @@ export async function searchUsers(eventId: string, query = '') {
   return rawRequest<{ data: Array<{ user: User; matching_skills: string[]; matching_roles: string[] }> }>(`/users/search?${params}`);
 }
 
-export async function teamCandidates(eventId: string, teamId: string) {
+export async function teamCandidates(eventId: string, teamId: string, query = '') {
+  const suffix = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : '';
   return rawRequest<{ data: Array<{ user: User; overallScore: number; mustHaveMatch: string[]; niceToHaveMatch: string[]; roleMatch: string | null }> }>(
-    `/events/${eventId}/teams/${teamId}/candidates`,
+    `/events/${eventId}/teams/${teamId}/candidates${suffix}`,
   );
 }
 
