@@ -178,23 +178,7 @@ router.put(
   }
 );
 
-// GET /v1/users/:id — public profile
-router.get('/:id', authenticate, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const user = await prisma.user.findUnique({
-      where: { id: req.params.id, deletedAt: null },
-      select: PUBLIC_USER_SELECT,
-    });
-
-    if (!user) throw new AppError(404, 'NOT_FOUND', 'User not found.');
-
-    res.json(user);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// GET /v1/users/search
+// GET /v1/users/search — MUST be registered before /:id to avoid param capture
 router.get('/search', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { event_id, skills, roles, limit = '20', cursor } = req.query as Record<string, string>;
