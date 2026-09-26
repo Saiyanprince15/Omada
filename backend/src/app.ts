@@ -13,6 +13,8 @@ import matchmakingRouter from './routes/matchmaking';
 import provisionalRouter from './routes/provisional';
 import chatRouter from './routes/chat';
 import notificationsRouter from './routes/notifications';
+import { prisma } from './lib/prisma';
+import { getRedis } from './lib/redis';
 import adminRouter from './routes/admin';
 
 import { errorHandler } from './middleware/errorHandler';
@@ -56,6 +58,17 @@ app.use(
 // ─── Health check ─────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.get('/ready', async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    await getRedis().ping();
+    res.json({ status: 'ready' });
+  } catch (err) {
+    console.error('[readiness]', err);
+    res.status(503).json({ status: 'not_ready' });
+  }
 });
 
 // ─── API routes ───────────────────────────────────────────────────────────
