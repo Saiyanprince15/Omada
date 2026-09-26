@@ -90,14 +90,14 @@ router.post(
               // Serialize responses for this provisional team. This prevents
               // two simultaneous accept/reject requests from converting or
               // replacing the same provisional team inconsistently.
-              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(\${pt_id}))`;
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${pt_id}))`;
 
               const current = await tx.provisionalTeam.findUniqueOrThrow({
                 where: { id: pt_id },
                 include: { members: true },
               });
               if (current.status !== 'pending') {
-                throw new AppError(409, 'ALREADY_RESOLVED', `Provisional team is already \${current.status}.`);
+                throw new AppError(409, 'ALREADY_RESOLVED', `Provisional team is already ${current.status}.`);
               }
 
               const membership = current.members.find((m) => m.userId === userId);
@@ -266,14 +266,14 @@ router.post(
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           result = await prisma.$transaction(async (tx) => {
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(\${pt_id}))`;
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${pt_id}))`;
 
             const current = await tx.provisionalTeam.findUniqueOrThrow({
               where: { id: pt_id },
               include: { members: true },
             });
             if (current.status !== 'pending') {
-              throw new AppError(409, 'ALREADY_RESOLVED', `Provisional team is already \${current.status}.`);
+              throw new AppError(409, 'ALREADY_RESOLVED', `Provisional team is already ${current.status}.`);
             }
 
             const membership = current.members.find((m) => m.userId === userId);
@@ -312,7 +312,7 @@ router.post(
             const team = await tx.team.create({
               data: {
                 eventId: event_id,
-                name: `Team-\${pt_id.slice(0, 8)}`,
+                name: `Team-${pt_id.slice(0, 8)}`,
                 ownerId: leaderMemberId,
                 chatRoomId: current.chatRoomId,
                 status: 'forming',
