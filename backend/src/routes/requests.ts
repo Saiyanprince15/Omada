@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { prisma } from '../lib/prisma';
+import { Prisma } from '@prisma/client';
 import { authenticate } from '../middleware/auth';
 import { validate, createRequestSchema, respondRequestSchema } from '../lib/validation';
 import { AppError } from '../middleware/errorHandler';
@@ -201,70 +202,78 @@ router.put(
       }
 
       // action === 'accept'
-      // Use a transaction to prevent race conditions — simultaneous accepts cannot create duplicate memberships
-      const result = await prisma.$transaction(async (tx) => {
-        // Re-read the participant row within the transaction (serializable)
-        const participant = await tx.eventParticipant.findUniqueOrThrow({
-          where: { eventId_userId: { eventId: event_id, userId } },
-        });
+      // Serialize competing accepts for the same participant. A user may only
+      // transition into one forming team, even when multiple invitations are
+      // accepted concurrently from different requests/tabs.
+      let result: { team: typeof request.team; cancelledCount: number } | undefined;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          result = await prisma.$transaction(async (tx) => {
+            const participant = await tx.eventParticipant.findUniqueOrThrow({
+              where: { eventId_userId: { eventId: event_id, userId } },
+            });
 
-        // User must be available to join
-        const unavailableStates = ['in_forming_team', 'in_finalized_team', 'in_provisional_team', 'in_matchmaking'];
-        if (unavailableStates.includes(participant.status)) {
-          throw new AppError(409, 'ALREADY_IN_TEAM', 'You are already in a team or matchmaking process.');
-        }
+            const unavailableStates = ['in_forming_team', 'in_finalized_team', 'in_provisional_team', 'in_matchmaking'];
+            if (unavailableStates.includes(participant.status)) {
+              throw new AppError(409, 'ALREADY_IN_TEAM', 'You are already in a team or matchmaking process.');
+            }
 
-        const teamId = request.teamId!;
+            const teamId = request.teamId!;
+            const team = await tx.team.findUniqueOrThrow({ where: { id: teamId } });
+            if (team.status !== 'forming') {
+              throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is no longer recruiting.');
+            }
 
-        // Re-read team state within transaction
-        const team = await tx.team.findUniqueOrThrow({ where: { id: teamId } });
-        if (team.status !== 'forming') {
-          throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is no longer recruiting.');
-        }
+            const existingMembership = await tx.teamMember.findUnique({
+              where: { teamId_userId: { teamId, userId } },
+            });
+            if (existingMembership && !existingMembership.leftAt) {
+              throw new AppError(409, 'ALREADY_MEMBER', 'You are already a member of this team.');
+            }
 
-        // Check if user is already a member (prevents double-add from concurrent requests)
-        const existingMembership = await tx.teamMember.findUnique({
-          where: { teamId_userId: { teamId, userId } },
-        });
-        if (existingMembership && !existingMembership.leftAt) {
-          throw new AppError(409, 'ALREADY_MEMBER', 'You are already a member of this team.');
-        }
+            if (existingMembership) {
+              await tx.teamMember.update({
+                where: { teamId_userId: { teamId, userId } },
+                data: { leftAt: null, roleInTeam: 'member' },
+              });
+            } else {
+              await tx.teamMember.create({ data: { teamId, userId, roleInTeam: 'member' } });
+            }
 
-        // Add member — if existingMembership exists (left), update; else create
-        if (existingMembership) {
-          await tx.teamMember.update({
-            where: { teamId_userId: { teamId, userId } },
-            data: { leftAt: null, roleInTeam: 'member' },
+            await tx.eventParticipant.update({
+              where: { eventId_userId: { eventId: event_id, userId } },
+              data: { status: 'in_forming_team', teamId },
+            });
+
+            await tx.requestInvitation.update({
+              where: { id: request_id },
+              data: { status: 'accepted', respondedAt: new Date() },
+            });
+
+            const cancelledCount = await tx.requestInvitation.updateMany({
+              where: {
+                eventId: event_id,
+                id: { not: request_id },
+                OR: [{ recipientId: userId }, { senderId: userId }],
+                status: 'pending',
+              },
+              data: { status: 'cancelled' },
+            });
+
+            return { team, cancelledCount: cancelledCount.count };
+          }, {
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+            maxWait: 5000,
+            timeout: 10000,
           });
-        } else {
-          await tx.teamMember.create({ data: { teamId, userId, roleInTeam: 'member' } });
+          break;
+        } catch (err: any) {
+          if (err?.code === 'P2034' && attempt < 2) continue;
+          throw err;
         }
+      }
 
-        // Update participant to in_forming_team (not finalized — team decides completion)
-        await tx.eventParticipant.update({
-          where: { eventId_userId: { eventId: event_id, userId } },
-          data: { status: 'in_forming_team', teamId },
-        });
-
-        // Mark request accepted
-        await tx.requestInvitation.update({
-          where: { id: request_id },
-          data: { status: 'accepted', respondedAt: new Date() },
-        });
-
-        // Cancel all other pending requests for this user in this event
-        const cancelledCount = await tx.requestInvitation.updateMany({
-          where: {
-            eventId: event_id,
-            id: { not: request_id },
-            OR: [{ recipientId: userId }, { senderId: userId }],
-            status: 'pending',
-          },
-          data: { status: 'cancelled' },
-        });
-
-        return { team, cancelledCount: cancelledCount.count };
-      });
+      if (!result) throw new AppError(500, 'TRANSACTION_FAILED', 'Could not accept the request.');
 
       await sendNotification({
         userId: request.senderId,
