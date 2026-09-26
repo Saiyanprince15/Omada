@@ -6,6 +6,7 @@ import { AppError } from '../middleware/errorHandler';
 import { sendNotification } from '../services/notificationService';
 import { rankCandidates, DEFAULT_WEIGHTS } from '../services/matchingEngine';
 import { normalizeSkill, normalizeRole } from '../lib/normalize';
+import { assertEventFormationOpen, assertEventIsActive } from '../lib/eventLifecycle';
 import { broadcastTeamUpdate } from '../socket';
 
 const router = Router({ mergeParams: true });
@@ -87,6 +88,7 @@ router.post(
 
       const event = await prisma.event.findUnique({ where: { id: event_id } });
       if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
+      assertEventFormationOpen(event.status);
 
       const body = req.body;
 
