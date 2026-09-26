@@ -45,7 +45,7 @@ export function errorHandler(
 
   // Prisma errors
   if (err.constructor.name === 'PrismaClientKnownRequestError') {
-    const prismaErr = err as { code: string; meta?: unknown };
+    const prismaErr = err as unknown as { code: string; meta?: unknown };
     if (prismaErr.code === 'P2002') {
       res.status(409).json({
         error: { code: 'CONFLICT', message: 'A record with these values already exists.' },

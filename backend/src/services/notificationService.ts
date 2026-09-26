@@ -37,7 +37,7 @@ export async function sendNotification(payload: NotificationPayload): Promise<vo
       type: payload.type,
       title: payload.title,
       body: payload.body,
-      data: payload.data ?? {},
+      data: (payload.data ?? {}) as any,
     },
   });
 
