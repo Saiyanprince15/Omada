@@ -1,0 +1,771 @@
+I am building a team-formation platform for hackathons and academic projects.
+
+I have attached a research/design document called **"Team-Formation System: User Flow & Components."**
+
+Read the entire attached document carefully before doing anything else.
+
+The document contains my intended user flow, identified issues, edge cases, algorithmic recommendations, UX recommendations, implementation checklist, and testing scenarios. Treat it as the primary design-research reference for this project.
+
+Your job is to turn that research into a technically sound, production-quality system design and then implement it.
+
+IMPORTANT: Do not immediately start coding.
+
+First understand the complete product and resolve the architectural ambiguities identified in the document.
+
+---
+
+# 1. Core product concept
+
+The platform helps people form teams for hackathons or academic projects.
+
+A user creates a profile containing:
+
+* Description/bio
+* Skills
+* Skill proficiency/experience
+* Interests
+* Preferred roles
+* Other relevant project preferences
+
+The system has two major ways of forming teams:
+
+### A. Manual team discovery
+
+Users can:
+
+1. Search for people they already know.
+2. Invite those people to their team.
+3. Browse existing teams that are looking for members.
+4. Search teams based on whether the team needs their skills.
+5. Browse teams without restricting results to their own skills.
+6. Request to join a team.
+
+Existing teams can also search for people who are currently looking for a team.
+
+For example:
+
+A team already contains:
+
+* Backend developer
+* ML developer
+* Researcher
+
+The team can search for a person with:
+
+* Frontend
+* React
+* UI/UX
+
+The system should rank candidates according to how much value they add to the existing team, not merely according to individual similarity.
+
+---
+
+# 2. User availability state
+
+A user should have a clear state within an event/project.
+
+At minimum:
+
+* Looking for team
+* In provisional team
+* In finalized team
+
+A user who is already committed to a finalized team should not appear as an available candidate for another team.
+
+This state must be handled safely at the database level so simultaneous requests cannot create inconsistent memberships.
+
+---
+
+# 3. Automatic matchmaking
+
+Users who are currently looking for a team can choose an automatic team-formation option.
+
+The existing document calls this "random team," but this is NOT truly random.
+
+It should be a compatibility/optimization-based matchmaking system.
+
+Only users who are currently available for matchmaking should be considered.
+
+The algorithm should consider:
+
+* Skill diversity
+* Skill complementarity
+* Role coverage
+* Experience balance
+* Interest compatibility
+* Preferred roles
+* Team-size constraints
+
+The goal is to create teams that are both:
+
+**compatible**
+
+and
+
+**diverse**
+
+Do not simply put people with similar skills together.
+
+For example:
+
+A team containing four Python developers is not necessarily better than a team containing:
+
+* Python/ML
+* Backend
+* Frontend
+* UI/UX
+
+if the latter has better role and skill coverage.
+
+---
+
+# 4. Provisional matchmaking
+
+Automatic matchmaking should NOT immediately create a permanent team.
+
+Instead:
+
+1. The algorithm proposes a candidate team.
+2. A temporary/provisional group is created.
+3. The matched users can see one another.
+4. Each user can view the others' profiles, skills, experience, interests and roles.
+5. The system explains why they were matched.
+6. Users can communicate in the temporary chat.
+7. Each user independently accepts or rejects the proposed team.
+
+The temporary chat should clearly indicate:
+
+**"Provisional Team — Not Yet Finalized"**
+
+---
+
+# 5. Acceptance/rejection
+
+Design this carefully.
+
+Do not assume that because the algorithm created a group, everyone automatically becomes a member.
+
+Possible states should be explicitly modeled.
+
+For example:
+
+* Pending
+* Accepted
+* Rejected
+* Left
+* Expired
+
+If one participant rejects/leaves:
+
+* That person should no longer be considered part of the provisional team.
+* The remaining participants should not be left in an undefined state.
+* The system should determine whether the remaining group is still viable.
+* If a replacement is needed, search the available pool for another suitable candidate.
+* If the provisional team cannot continue, explain what happened and return the affected users to the appropriate available state.
+
+The exact state machine should be designed before implementation.
+
+---
+
+# 6. Permanent team
+
+Only after the required acceptance conditions are met should the provisional team become a finalized team.
+
+After finalization:
+
+* Team membership becomes official.
+* The permanent team chat is created/activated.
+* Members can discuss goals.
+* Members can assign responsibilities.
+* Members can share resources.
+* Members can coordinate the project.
+
+The temporary matchmaking room and permanent team chat should be treated as separate lifecycle states.
+
+---
+
+# 7. Existing team member search
+
+A finalized or forming team that still has an available slot should be able to search users who are currently looking for a team.
+
+The team should be able to define:
+
+### Must-have skills
+
+Skills that are genuinely required.
+
+### Nice-to-have skills
+
+Skills that improve the team but are not mandatory.
+
+### Required role
+
+Example:
+
+Frontend Developer.
+
+### Preferred role
+
+Example:
+
+UI/UX Designer.
+
+The candidate-ranking system should consider the **marginal contribution** of a candidate to the existing team.
+
+For example:
+
+If a team already has three strong backend developers, another backend developer may have lower marginal value than a competent frontend developer.
+
+---
+
+# 8. Team discovery
+
+Users looking for teams should have clear discovery modes.
+
+### Match my skills
+
+Show teams that are actively looking for skills/roles the user has.
+
+### Explore teams
+
+Allow users to browse teams even if their skills are not currently requested.
+
+Do not interpret "preference" as a hard restriction.
+
+The UI should use understandable language rather than ambiguous terminology.
+
+---
+
+# 9. Team profiles
+
+A team profile should show useful information such as:
+
+* Team name
+* Team description
+* Current members
+* Current team size
+* Maximum team size
+* Open positions
+* Required skills
+* Nice-to-have skills
+* Required roles
+* Interests/project domain
+* Project idea, if one exists
+* Current status
+
+Do not expose private information unnecessarily.
+
+---
+
+# 10. Team creation
+
+The document identifies an ambiguity around how teams are initially created.
+
+Resolve this explicitly.
+
+The system should support a logical way for a user to start a team, invite known people, and search for additional members.
+
+Define:
+
+* Who becomes team leader/owner
+* Whether ownership can be transferred
+* What happens if the leader leaves
+* Who can invite members
+* Who can remove members
+* Who can finalize/dissolve a team
+
+Do not leave these permissions implicit.
+
+---
+
+# 11. Event/project scope
+
+The system should be event-aware.
+
+Team formation should happen within a specific context such as:
+
+* Hackathon 2026
+* College Project
+* Robotics Competition
+* Research Project
+
+A user's availability and team membership should be tracked per event/project.
+
+Do not accidentally make a person unavailable globally simply because they joined one event.
+
+---
+
+# 12. Team size and constraints
+
+The organizer should be able to define:
+
+* Minimum team size
+* Maximum team size
+* Required roles
+* Required skills
+* Optional roles
+* Optional skills
+
+Separate:
+
+### Hard constraints
+
+These must be satisfied.
+
+Example:
+
+"Every team must contain at least one developer."
+
+### Soft objectives
+
+These should be optimized.
+
+Example:
+
+"Prefer teams containing complementary interests."
+
+The algorithm must satisfy hard constraints before optimizing soft objectives.
+
+Also handle cases where the participant count cannot divide evenly into teams.
+
+---
+
+# 13. Matching algorithm
+
+Design the algorithm carefully.
+
+Do not simply use an LLM to decide teams.
+
+The core assignment should be deterministic/algorithmic and explainable.
+
+The algorithm should optimize some combination of:
+
+### Skill diversity
+
+Avoid unnecessary duplication.
+
+### Skill coverage
+
+Ensure teams collectively possess the capabilities required for the project.
+
+### Role coverage
+
+Ensure important roles are represented.
+
+### Skill complementarity
+
+Reward skills that work well together.
+
+### Experience balance
+
+Avoid concentrating all experienced members into one team.
+
+### Interest compatibility
+
+Give teams enough common interests to collaborate effectively.
+
+### Role preference satisfaction
+
+Respect preferred roles where possible.
+
+### Marginal team contribution
+
+Measure what a person adds to the current team rather than just measuring person-to-person similarity.
+
+### Fairness
+
+Avoid systematically creating highly advantaged and highly disadvantaged teams.
+
+Do not arbitrarily choose weights.
+
+Explain the proposed mathematical scoring model and justify each component before implementation.
+
+---
+
+# 14. Explainability
+
+Every automatically generated team must have a meaningful explanation.
+
+Example:
+
+**Why were you matched with Team Alpha?**
+
+* Team needed a frontend developer.
+* You have React and JavaScript skills.
+* Team already has strong backend coverage.
+* Your UI/UX interest complements the team.
+* Your preferred role is Frontend Developer.
+* Experience levels are reasonably balanced.
+
+Also provide a team-level breakdown such as:
+
+* Skill coverage
+* Skill diversity
+* Role coverage
+* Experience balance
+* Interest compatibility
+* Preference satisfaction
+
+Do not display arbitrary scores without explaining what they represent.
+
+---
+
+# 15. Requests and invitations
+
+There are several different interactions:
+
+### User → Team
+
+User requests to join a team.
+
+### Team → User
+
+Team invites a user.
+
+### User → User / Known person
+
+User invites a known person to join their team.
+
+These should not all be treated as the exact same interaction.
+
+Design an appropriate request model and state machine.
+
+Include states such as:
+
+* Pending
+* Accepted
+* Rejected
+* Cancelled
+* Expired
+
+Handle duplicate requests safely.
+
+---
+
+# 16. Concurrency
+
+This is important.
+
+Design the backend to handle simultaneous actions.
+
+Example:
+
+A team has one remaining slot.
+
+User A and User B both try to join at almost the same time.
+
+Only one should obtain the slot.
+
+Another example:
+
+A user receives invitations from Team A and Team B.
+
+They accept Team A.
+
+Team B must no longer be able to finalize that user as its member.
+
+The database/state transition must be atomic.
+
+Do not rely only on frontend checks.
+
+---
+
+# 17. Failure cases
+
+Explicitly handle:
+
+* User rejects a provisional match
+* User leaves provisional chat
+* User leaves a finalized team
+* Team leader leaves
+* Team becomes incomplete
+* Team becomes full
+* User accepts another team
+* Duplicate invitations
+* Expired requests
+* User goes offline
+* Network failure during acceptance
+* No suitable candidate exists
+* Rare/unique skills
+* Too few participants
+* Participant count not divisible by team size
+* Users changing their profile during matchmaking
+* User repeatedly restarting matchmaking
+* Team dissolves
+
+Every failure state should return users to a valid state.
+
+There should be no "orphaned" users or permanently stuck requests.
+
+---
+
+# 18. Privacy and security
+
+The platform contains profiles and private team conversations.
+
+Implement appropriate:
+
+* Authentication
+* Authorization
+* Team-level access control
+* Chat access control
+* Input validation
+* Input sanitization
+* XSS protection
+* Rate limiting
+* Invitation spam protection
+* Message spam protection
+* Block functionality
+* Report functionality
+* Admin/moderator controls
+
+Only expose information necessary for team formation.
+
+Do not expose private contact information by default.
+
+---
+
+# 19. Notifications
+
+Design notifications for:
+
+* Team invitations
+* Join requests
+* Request acceptance/rejection
+* Provisional matchmaking
+* New provisional team members
+* Match rejection
+* Replacement candidate
+* Final team creation
+* Team chat messages
+
+Start with in-app notifications unless another mechanism is necessary.
+
+---
+
+# 20. AI/API integration
+
+Use AI/API integration only where it provides meaningful value.
+
+Potential AI functionality:
+
+### Profile parsing
+
+Convert natural-language descriptions into structured:
+
+* Skills
+* Experience
+* Interests
+* Roles
+
+### Skill normalization
+
+Recognize relationships such as:
+
+"React"
+
+"React.js"
+
+"React frontend"
+
+### Match explanation
+
+Generate natural-language explanations of algorithmic results.
+
+### Optional project recommendation
+
+Once a team exists, analyze its combined skills/interests and suggest suitable project ideas.
+
+The LLM should NOT be the authority deciding who gets placed into which team.
+
+---
+
+# 21. Optional integrations
+
+Possible future integrations:
+
+* GitHub
+* LinkedIn
+* Portfolio
+* Calendar
+* External project management tools
+
+Treat these as optional/advanced features, not mandatory MVP requirements.
+
+---
+
+# 22. Organizer functionality
+
+Consider an organizer/admin dashboard where organizers can:
+
+* Create events
+* Define team-size limits
+* Define required roles
+* Define required skills
+* View participants
+* View teams
+* See users still looking
+* See skill distribution
+* See unmatched participants
+* Manually intervene
+* Rebalance teams
+* Remove/dissolve teams when necessary
+* View moderation reports
+
+---
+
+# 23. Testing
+
+Before implementation, define tests for:
+
+### Matching algorithm
+
+* Skill diversity
+* Role coverage
+* Experience balance
+* Interest compatibility
+* Preference satisfaction
+* Marginal contribution
+* Hard constraints
+
+### User flows
+
+* Signup
+* Profile creation
+* Team search
+* User search
+* Join request
+* Team invitation
+* Known-person invitation
+* Automatic matchmaking
+* Provisional chat
+* Acceptance
+* Rejection
+* Replacement
+* Final team creation
+* Team departure
+
+### Concurrency
+
+* Two users claiming one slot
+* Same user accepting two teams
+* Team filling while another user is applying
+* Simultaneous accept/reject operations
+
+### Security
+
+* Unauthorized team access
+* Unauthorized chat access
+* Profile data exposure
+* XSS/injection
+* Invitation spam
+
+---
+
+# 24. What I want from you BEFORE coding
+
+Do NOT start implementing immediately.
+
+First produce a comprehensive technical design review.
+
+I want the response structured as:
+
+## A. Understanding of the product
+
+Restate the system you believe I am building.
+
+## B. Problems/ambiguities in the current design
+
+Identify anything that needs a decision before implementation.
+
+## C. Recommended user state machine
+
+Show every meaningful user state and transition.
+
+## D. Recommended team state machine
+
+Show every meaningful team state and transition.
+
+## E. Recommended request/invitation state machine
+
+Show every request type and state.
+
+## F. Database architecture
+
+Define the entities/tables, important fields, relationships, indexes and constraints.
+
+## G. Matching algorithm
+
+Design the actual mathematical/algorithmic approach.
+
+Explain:
+
+* Inputs
+* Hard constraints
+* Soft constraints
+* Scoring
+* Team-level objective
+* Candidate ranking
+* How diversity is measured
+* How experience balance is measured
+* How preferences are handled
+* How ties are resolved
+* How unmatched users are handled
+
+## H. Explainability system
+
+Explain how the system will generate evidence-based explanations for each match.
+
+## I. API architecture
+
+Define the required backend/API endpoints and what each does.
+
+## J. Real-time architecture
+
+Explain how provisional chat, permanent chat, notifications and real-time team availability should work.
+
+## K. Security model
+
+Define authentication, authorization, access control and abuse prevention.
+
+## L. MVP vs advanced features
+
+Clearly separate:
+
+**MVP**
+
+from
+
+**Phase 2**
+
+from
+
+**Optional/future**
+
+Do not unnecessarily inflate the MVP.
+
+## M. Testing strategy
+
+Give unit, integration, concurrency and security tests.
+
+## N. Recommended final architecture
+
+Give me the complete architecture and explain why each component exists.
+
+Only after I approve this design should you begin implementation.
+
+---
+
+# Most important instruction
+
+Preserve the core concept of my system.
+
+Do not turn it into a generic "AI team generator."
+
+The distinctive workflow is:
+
+**Profile → Discover people/teams OR enter matchmaking → Provisional matching → Temporary interaction/approval → Final team → Permanent team collaboration**
+
+The matching system should be explainable and should optimize for **balanced, diverse and compatible teams**, rather than merely matching people with similar skills.
+
+Use the attached research document as the primary reference throughout this process.
