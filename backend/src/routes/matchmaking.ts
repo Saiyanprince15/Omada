@@ -205,7 +205,7 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
               type: 'match_proposed',
               title: "You've been matched with a team!",
               body: 'Review your provisional team and accept or decline.',
-              data: { provisional_team_id: pt.id },
+              data: { provisional_team_id: pt.id, event_id },
             });
           }
         }
@@ -218,7 +218,7 @@ router.post('/:event_id/matchmaking/run', authenticate, async (req: Request, res
             type: 'match_proposed',
             title: 'Matchmaking update',
             body: 'Not enough participants were available for automatic matching. You remain in the discovery pool.',
-            data: { round_id: result.roundId },
+            data: { round_id: result.roundId, event_id },
           });
         }
       })
