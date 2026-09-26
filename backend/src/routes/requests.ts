@@ -273,7 +273,7 @@ router.put(
         }
       }
 
-      if (!result) throw new AppError(500, 'TRANSACTION_FAILED', 'Could not accept the request.');
+      if (!result || !result.team) throw new AppError(500, 'TRANSACTION_FAILED', 'Could not accept the request.');
 
       await sendNotification({
         userId: request.senderId,
