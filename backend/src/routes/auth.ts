@@ -95,17 +95,20 @@ router.post(
       }
 
       if (!passwordMatch) {
-        // Increment failed attempts
-        const newFailedAttempts = (user.failedLoginAttempts ?? 0) + 1;
-        const shouldLock = newFailedAttempts >= MAX_FAILED_ATTEMPTS;
-
-        await prisma.user.update({
+        // Atomic increment avoids losing failed-attempt updates when several
+        // invalid login requests arrive at the same time.
+        const updated = await prisma.user.update({
           where: { id: user.id },
-          data: {
-            failedLoginAttempts: newFailedAttempts,
-            ...(shouldLock ? { lockedUntil: new Date(Date.now() + LOCKOUT_DURATION_MS) } : {}),
-          },
+          data: { failedLoginAttempts: { increment: 1 } },
+          select: { failedLoginAttempts: true },
         });
+
+        if (updated.failedLoginAttempts >= MAX_FAILED_ATTEMPTS) {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { lockedUntil: new Date(Date.now() + LOCKOUT_DURATION_MS) },
+          });
+        }
 
         throw new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password.');
       }
