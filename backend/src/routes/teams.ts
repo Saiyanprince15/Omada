@@ -75,7 +75,7 @@ function requireMutableTeam(team: { status: string }, allowedStatuses: string[] 
 // ─── POST /v1/events/:event_id/teams ──────────────────────────────────────
 // Creates a manual team. Owner is placed into `in_forming_team` state.
 // Team completion must be explicitly decided (finalize endpoint).
-// Chat room is NOT created here — only a provisional workspace is created.
+// No persistent workspace is created here. Finalized teams receive a permanent chat.
 // The permanent team chat room is created at finalization time (fix #10).
 router.post(
   '/:event_id/teams',
@@ -108,9 +108,8 @@ router.post(
           throw new AppError(409, 'INVALID_STATE', `Cannot create a team from state: ${participant.status}.`);
         }
 
-        // Create a provisional chat room for the forming team (not permanent yet — fix #10)
-        const chatRoom = await tx.chatRoom.create({ data: { roomType: 'provisional' } });
-
+        // Manual forming teams do not receive a persistent chat yet.
+        // A permanent workspace is created only when the team is finalized.
         const newTeam = await tx.team.create({
           data: {
             eventId: event_id,
@@ -118,7 +117,7 @@ router.post(
             description: body.description,
             ownerId: userId,
             projectIdea: body.project_idea,
-            chatRoomId: chatRoom.id,
+            chatRoomId: null,
             source: 'manual',
             status: 'forming',
             requirements: {
