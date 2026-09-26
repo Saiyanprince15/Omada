@@ -312,7 +312,7 @@ async function main() {
   console.log('  Eve:   eve@omada.dev    (looking for team)');
   console.log(`\n  Event ID: ${event.id}`);
   console.log(`  Team ID:  ${team.id}`);
-  console.log(`  Chat Room ID: ${chatRoom.id}`);
+  console.log('  Chat: permanent workspace is created only when the team is finalized.');
 }
 
 main()
