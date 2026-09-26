@@ -181,6 +181,35 @@ router.post(
               const replacement = scored[0]?.candidate ?? null;
 
               if (replacement) {
+                // Atomically claim the candidate. Another provisional team may
+                // have selected the same person between discovery and this
+                // transaction; only one transaction is allowed to move them
+                // out of the looking-for-team pool.
+                const claimed = await tx.eventParticipant.updateMany({
+                  where: {
+                    eventId: event_id,
+                    userId: replacement.userId,
+                    status: 'looking_for_team',
+                  },
+                  data: {
+                    status: 'in_provisional_team',
+                    provisionalTeamId: pt_id,
+                    profileSnapshot: {
+                      skills: replacement.user.skills,
+                      interests: replacement.user.interests,
+                      preferredRoles: replacement.user.preferredRoles,
+                    } as object,
+                  },
+                });
+
+                if (claimed.count !== 1) {
+                  return {
+                    replacementUserId: null,
+                    remainingUserIds: remaining.map((m) => m.userId),
+                    dissolved: false,
+                  };
+                }
+
                 const replacementMember = await tx.provisionalTeamMember.create({
                   data: {
                     provisionalTeamId: pt_id,
@@ -192,11 +221,6 @@ router.post(
                       reason: 'Selected from the current discovery pool to replace a declined member.',
                     },
                   },
-                });
-
-                await tx.eventParticipant.update({
-                  where: { eventId_userId: { eventId: event_id, userId: replacement.userId } },
-                  data: { status: 'in_provisional_team', provisionalTeamId: pt_id },
                 });
 
                 return {
