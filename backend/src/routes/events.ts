@@ -141,6 +141,35 @@ router.post('/:id/register', authenticate, async (req: Request, res: Response, n
   }
 });
 
+// ─── GET /v1/events/:id/participation/me ─────────────────────────────────
+router.get('/:id/participation/me', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const participation = await prisma.eventParticipant.findUnique({
+      where: { eventId_userId: { eventId: req.params.id, userId: req.user!.sub } },
+      include: {
+        team: { select: { id: true, name: true, status: true } },
+        provisionalTeam: { select: { id: true, status: true, expiresAt: true } },
+      },
+    });
+
+    if (!participation) {
+      res.json({ registered: false });
+      return;
+    }
+
+    res.json({
+      registered: true,
+      status: participation.status,
+      team: participation.team,
+      provisional_team: participation.provisionalTeam,
+      matchmaking_restarts: participation.matchmakingRestarts,
+      last_matchmaking_at: participation.lastMatchmakingAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── PUT /v1/events/:id/participation ─────────────────────────────────────
 router.put(
   '/:id/participation',
