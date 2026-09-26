@@ -117,6 +117,15 @@ export async function getEvent(eventId: string) {
   return rawRequest<Event>(`/events/${eventId}`);
 }
 
+export async function getParticipation(eventId: string) {
+  return rawRequest<{
+    registered: boolean;
+    status?: string;
+    team?: { id: string; name: string; status: string } | null;
+    provisional_team?: { id: string; status: string; expiresAt: string } | null;
+  }>(`/events/${eventId}/participation/me`);
+}
+
 export async function registerForEvent(eventId: string) {
   return rawRequest(`/events/${eventId}/register`, { method: 'POST' });
 }
