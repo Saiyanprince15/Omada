@@ -367,6 +367,10 @@ router.post('/:event_id/teams/:team_id/finalize', authenticate, async (req: Requ
       if (!currentTeam || currentTeam.eventId !== event_id) {
         throw new AppError(404, 'NOT_FOUND', 'Team not found.');
       }
+      if (currentTeam.ownerId !== req.user!.sub ||
+          !currentTeam.members.some((member) => member.userId === req.user!.sub && member.leftAt === null)) {
+        throw new AppError(403, 'FORBIDDEN', 'You are no longer the owner of this team.');
+      }
       if (currentTeam.status === 'finalized') {
         throw new AppError(409, 'ALREADY_FINALIZED', 'Team is already finalized.');
       }
@@ -519,6 +523,21 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
     if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
 
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${team_id}))`;
+
+      const currentTeam = await tx.team.findUnique({
+        where: { id: team_id },
+        include: { members: { where: { leftAt: null } } },
+      });
+      if (!currentTeam || currentTeam.eventId !== event_id) {
+        throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+      }
+
+      const currentMembership = currentTeam.members.find((member) => member.userId === userId);
+      if (!currentMembership) {
+        throw new AppError(404, 'NOT_FOUND', 'You are not an active team member.');
+      }
+
       await tx.teamMember.update({
         where: { teamId_userId: { teamId: team_id, userId } },
         data: { leftAt: new Date() },
@@ -529,12 +548,11 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
         data: { status: 'looking_for_team', teamId: null },
       });
 
-      const remainingMembers = team.members.filter((m) => m.userId !== userId && !m.leftAt);
+      const remainingMembers = currentTeam.members.filter((m) => m.userId !== userId && !m.leftAt);
 
       if (remainingMembers.length === 0) {
-        // Dissolve if no members left
         await tx.team.update({ where: { id: team_id }, data: { status: 'dissolved' } });
-      } else if (membership.roleInTeam === 'owner') {
+      } else if (currentMembership.roleInTeam === 'owner') {
         // Auto-transfer ownership to longest-tenured member
         const newOwner = remainingMembers.sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime())[0]!;
         await tx.team.update({ where: { id: team_id }, data: { ownerId: newOwner.userId } });
