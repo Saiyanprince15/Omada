@@ -687,6 +687,7 @@ router.delete(
 router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { team_id, event_id } = req.params;
+    const { q } = req.query as Record<string, string>;
 
     // Fix #2: cross-event auth
     const teamRecord = await requireTeamInEvent(team_id, event_id);
@@ -720,7 +721,13 @@ router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Req
 
     // Load available candidates (looking for team or registered — can still be invited)
     const availableParticipants = await prisma.eventParticipant.findMany({
-      where: { eventId: event_id, status: { in: ['looking_for_team', 'registered'] } },
+      where: {
+        eventId: event_id,
+        status: { in: ['looking_for_team', 'registered'] },
+        ...(q?.trim()
+          ? { user: { displayName: { contains: q.trim(), mode: 'insensitive' } } }
+          : {}),
+      },
       include: { user: { include: { skills: true, interests: true, preferredRoles: true } } },
     });
 
