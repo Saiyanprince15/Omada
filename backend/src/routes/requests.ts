@@ -6,6 +6,7 @@ import { validate, createRequestSchema, respondRequestSchema } from '../lib/vali
 import { AppError } from '../middleware/errorHandler';
 import { sendNotification } from '../services/notificationService';
 import { redisRateLimit } from '../middleware/rateLimiter';
+import { assertEventFormationOpen, assertEventIsActive } from '../lib/eventLifecycle';
 
 const router = Router({ mergeParams: true });
 
@@ -24,6 +25,10 @@ router.post(
       const senderParticipant = await prisma.eventParticipant.findUnique({
         where: { eventId_userId: { eventId: event_id, userId: senderId } },
       });
+
+      const event = await prisma.event.findUnique({ where: { id: event_id } });
+      if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
+      assertEventFormationOpen(event.status);
 
       if (!senderParticipant) throw new AppError(403, 'NOT_REGISTERED', 'You must register for the event first.');
 
@@ -168,6 +173,11 @@ router.put(
       });
 
       if (!request || request.eventId !== event_id) throw new AppError(404, 'NOT_FOUND', 'Request not found.');
+
+      const event = await prisma.event.findUnique({ where: { id: event_id } });
+      if (!event) throw new AppError(404, 'NOT_FOUND', 'Event not found.');
+      assertEventIsActive(event.status);
+
       if (request.status !== 'pending') throw new AppError(409, 'ALREADY_RESOLVED', 'This request has already been resolved.');
 
       // Validate actor
