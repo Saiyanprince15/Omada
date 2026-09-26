@@ -2,7 +2,7 @@ import { Server as HttpServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import { verifyAccessToken } from './lib/jwt';
 import { prisma } from './lib/prisma';
-import { setPresence, removePresence, getRedis } from './lib/redis';
+import { setPresence, removePresence, getRedis, checkRateLimit } from './lib/redis';
 
 let io: Server;
 
@@ -94,6 +94,12 @@ export function initSocket(httpServer: HttpServer): Server {
         const canAccess = await checkRoomAccess(data.room_id, userId);
         if (!canAccess) {
           socket.emit('error', { code: 'FORBIDDEN', message: 'Cannot send to this room.' });
+          return;
+        }
+
+        const rate = await checkRateLimit(`socket_chat_message:${userId}`, 60, 60_000);
+        if (!rate.allowed) {
+          socket.emit('error', { code: 'RATE_LIMITED', message: 'Too many messages. Please slow down.' });
           return;
         }
 
