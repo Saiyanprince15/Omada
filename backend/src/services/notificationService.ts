@@ -41,11 +41,16 @@ export async function sendNotification(payload: NotificationPayload): Promise<vo
     },
   });
 
-  // Publish to Redis so Socket.IO gateway can forward to user
-  await publish(`notification:user:${payload.userId}`, {
-    event: 'notification:new',
-    payload: notification,
-  });
+  // Real-time delivery is best-effort. The notification is already persisted,
+  // so a Redis outage must not turn an otherwise successful action into a 500.
+  try {
+    await publish(`notification:user:${payload.userId}`, {
+      event: 'notification:new',
+      payload: notification,
+    });
+  } catch (err) {
+    console.error('[notifications] Realtime publish failed; notification remains persisted:', err);
+  }
 }
 
 export async function sendBulkNotifications(payloads: NotificationPayload[]): Promise<void> {
