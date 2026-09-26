@@ -95,7 +95,7 @@ async function launchMatchmaking(eventId: string, weights: MatchWeights = DEFAUL
     .catch(async (err) => {
       console.error('[matchmaking] Error running auto-match:', err);
       await prisma.matchingRound.update({
-        where: { id: round.id },
+        where: { id: round.round.id },
         data: { status: 'failed', completedAt: new Date() },
       }).catch((updateErr) => console.error('[matchmaking] Failed to mark round failed:', updateErr));
     });
