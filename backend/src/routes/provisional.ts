@@ -256,7 +256,7 @@ router.post(
             type: 'match_proposed',
             title: "You've been matched with a replacement provisional team!",
             body: 'A member declined, and you have been invited to review the provisional team.',
-            data: { provisional_team_id: pt_id },
+            data: { provisional_team_id: pt_id, event_id },
           });
         }
 
@@ -386,7 +386,7 @@ router.post(
             type: 'provisional_converted' as const,
             title: '🎉 Your provisional team is now a forming team!',
             body: 'All members accepted. Finalize your team when you are ready.',
-            data: { team_id: result.teamId },
+            data: { team_id: result.teamId, event_id },
           }))
         );
       }
