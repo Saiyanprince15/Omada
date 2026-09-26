@@ -53,6 +53,16 @@ The web app runs on `http://localhost:5173`.
 
 Set `VITE_API_URL` and `VITE_WS_URL` in `.env` when the API is hosted elsewhere.
 
+## Docker
+
+For a local full-stack environment with PostgreSQL, Redis, backend, and frontend:
+
+```bash
+docker compose up --build
+```
+
+The frontend is then available at `http://localhost:8080` and the API at `http://localhost:3000`. For non-local deployment, provide strong JWT secrets and the correct public API/WebSocket URLs instead of the example values.
+
 ## Core routes
 
 The backend exposes authentication, profiles, event participation, team discovery, manual teams, invitations, auto-match, provisional approvals, chat, notifications, and admin APIs under `/v1`.
