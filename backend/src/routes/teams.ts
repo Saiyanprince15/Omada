@@ -329,6 +329,40 @@ router.put(
   }
 );
 
+// ─── POST /v1/events/:event_id/teams/:team_id/recruiting ────────────────
+router.post('/:event_id/teams/:team_id/recruiting', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { team_id, event_id } = req.params;
+    const { open } = req.body as { open?: boolean };
+
+    if (typeof open !== 'boolean') {
+      throw new AppError(400, 'BAD_REQUEST', 'The open field must be a boolean.');
+    }
+
+    const team = await requireTeamInEvent(team_id, event_id);
+    await requireTeamMembership(team_id, req.user!.sub, ['owner']);
+
+    if (team.status !== 'finalized') {
+      throw new AppError(409, 'INVALID_STATE', 'Only finalized teams can reopen recruitment.');
+    }
+
+    const updated = await prisma.team.update({
+      where: { id: team_id },
+      data: { recruiting: open },
+      include: TEAM_PUBLIC_INCLUDE,
+    });
+
+    res.json({
+      team: {
+        ...updated,
+        current_size: updated.members.filter((m) => !m.leftAt).length,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── POST /v1/events/:event_id/teams/:team_id/finalize ────────────────────
 // Team completion is ALWAYS explicitly decided by the team (never from member count).
 // Fix #10: Permanent team chat room is created here at finalization time.
@@ -733,8 +767,12 @@ router.get('/:event_id/teams/:team_id/candidates', authenticate, async (req: Req
     // Fix #2: cross-event auth
     const teamRecord = await requireTeamInEvent(team_id, event_id);
 
-    // Fix #12: no candidate search for finalized teams
-    requireMutableTeam(teamRecord);
+    if (
+      teamRecord.status !== 'forming' &&
+      !(teamRecord.status === 'finalized' && teamRecord.recruiting)
+    ) {
+      requireMutableTeam(teamRecord);
+    }
 
     await requireTeamMembership(team_id, req.user!.sub, ['owner', 'admin']);
 
