@@ -90,6 +90,7 @@ export interface Team {
   projectIdea?: string | null;
   status: TeamStatus;
   source: 'manual' | 'auto_match';
+  recruiting: boolean;
   owner: { id: string; displayName: string; avatarUrl?: string | null };
   members: TeamMember[];
   requirements: TeamRequirement[];
