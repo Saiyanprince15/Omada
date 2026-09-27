@@ -334,24 +334,14 @@ router.post(
             const sortedMembers = [...activeMembers].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
             const leaderMemberId = sortedMembers[0]!.userId;
 
-            // Keep the provisional room as the team's forming-stage workspace.
+            // Keep the provisional room open as the team's forming-stage workspace.
             // Finalization will create the permanent room and archive this room.
-            // The provisional room is temporary and ends when the
-            // provisional match is converted. The forming team receives its
-            // permanent workspace only after explicit finalization.
-            if (current.chatRoomId) {
-              await tx.chatRoom.update({
-                where: { id: current.chatRoomId },
-                data: { status: 'archived' },
-              });
-            }
-
             const team = await tx.team.create({
               data: {
                 eventId: event_id,
                 name: `Team-${pt_id.slice(0, 8)}`,
                 ownerId: leaderMemberId,
-                chatRoomId: null,
+                chatRoomId: current.chatRoomId,
                 status: 'forming',
                 source: 'auto_match',
               },
