@@ -162,25 +162,109 @@ export function TeamPage() {
   const navigate = useNavigate();
   const [candidateData,setCandidateData] = useState<Array<{user:User;overallScore:number;mustHaveMatch:string[];niceToHaveMatch:string[];roleMatch:string|null}>>([]);
   const [candidateQuery,setCandidateQuery]=useState('');
+  const [candidatesLoaded,setCandidatesLoaded]=useState(false);
   const [error,setError]=useState('');
   const [busy,setBusy]=useState(false);
-  async function action(fn:()=>Promise<unknown>){setBusy(true);setError('');try{await fn();await refreshUser();await team.reload();}catch(e){setError(e instanceof Error?e.message:'Action failed.');}finally{setBusy(false);}}
-  async function loadCandidates(){try{setCandidateData((await api.teamCandidates(eventId,teamId,candidateQuery)).data);}catch(e){setError(e instanceof Error?e.message:'Could not load candidates.');}}
+
+  async function action(fn:()=>Promise<unknown>){
+    setBusy(true); setError('');
+    try{await fn();await refreshUser();await team.reload();}
+    catch(e){setError(e instanceof Error?e.message:'Action failed.');}
+    finally{setBusy(false);}
+  }
+
+  async function loadCandidates(){
+    try{
+      const result=await api.teamCandidates(eventId,teamId,candidateQuery);
+      setCandidateData(result.data);
+      setCandidatesLoaded(true);
+    }catch(e){
+      setError(e instanceof Error?e.message:'Could not load candidates.');
+    }
+  }
+
   if(team.loading)return <Loading/>;
   if(!team.data)return <ErrorBox message={team.error??'Team not found.'}/>;
+
   const currentTeam = team.data;
   const isOwner=currentTeam.owner.id===user?.id;
   const currentMembership = currentTeam.members.find((m)=>m.userId===user?.id);
   const canManageMembers = currentMembership?.roleInTeam === 'owner' || currentMembership?.roleInTeam === 'admin';
+  const canRecruit = isOwner && currentTeam.status === 'finalized';
+  const canSearchCandidates = currentTeam.status === 'forming' || (currentTeam.status === 'finalized' && currentTeam.recruiting);
+
   async function leaveCurrentTeam() {
     if (!window.confirm('Leave this team?')) return;
     await action(async()=>{ await api.leaveTeam(eventId,teamId); navigate(`/teams?event=${eventId}`); });
   }
+
   async function removeMember(userId: string, displayName: string) {
     if (!window.confirm(`Remove ${displayName} from this team?`)) return;
     await action(()=>api.removeTeamMember(eventId,teamId,userId));
   }
-  return <><PageHeader eyebrow="Team workspace" title={currentTeam.name} description={currentTeam.projectIdea || currentTeam.description || undefined} action={<Link className="btn btn-soft" to={`/teams?event=${eventId}`}>Back to discovery</Link>}/>{error&&<div className="alert alert-danger">{error}</div>}<div className="two-col"><section className="surface"><div className="section-heading"><div><h3>Members</h3><p>{currentTeam.current_size} active member{currentTeam.current_size===1?'':'s'}</p></div><Badge tone={currentTeam.status==='forming'?'warn':'good'}>{currentTeam.status}</Badge></div><div className="member-list">{currentTeam.members.map(m=><div className="member-row" key={m.id}><Avatar user={m.user}/><div><strong>{m.user.displayName}</strong><small>{m.roleInTeam}{m.user.preferredRoles[0] ? ` · ${m.user.preferredRoles[0].roleDisplay}` : ''}</small></div><div className="chip-row">{m.user.skills.slice(0,2).map(s=><Badge key={s.skillName}>{s.skillDisplay}</Badge>)}</div>{canManageMembers && m.userId!==user?.id && (currentMembership?.roleInTeam==='owner' || m.roleInTeam==='member') && <Button variant="danger" className="btn-sm" disabled={busy} onClick={()=>void removeMember(m.userId,m.user.displayName)}>Remove</Button>}</div>)}</div></section><section className="surface"><h3>Team actions</h3><div className="action-grid">{currentTeam.chatRoomId&&<Link className="btn btn-soft" to={`/chat/${currentTeam.chatRoomId}?team=${teamId}&event=${eventId}`}>Open chat</Link>}{currentTeam.status==='forming'&&participation.data?.status==='looking_for_team'&&!currentTeam.members.some((m)=>m.userId===user?.id)&&<Button disabled={busy} onClick={()=>void action(async()=>{await api.sendRequest(eventId,{type:'join_request',team_id:teamId,message:'I’d like to join your team.'}); await participation.reload();})}>Request to join</Button>}{isOwner&&currentTeam.status==='forming'&&<><Button variant="soft" onClick={()=>void loadCandidates()}>Find candidates</Button><Button disabled={busy} onClick={()=>void action(()=>api.finalizeTeam(eventId,teamId))}>Finalize team</Button><Button variant="danger" disabled={busy} onClick={()=>void action(()=>api.dissolveTeam(eventId,teamId))}>Dissolve</Button></>}{user?.id&&currentTeam.members.some(m=>m.userId===user.id)&&['forming','finalized'].includes(currentTeam.status)&&<Button variant="ghost" disabled={busy} onClick={()=>void leaveCurrentTeam()}>Leave team</Button>}</div></section></div>{candidateData.length>0&&<section className="surface section-margin"><div className="section-heading"><div><h3>Candidate search</h3><p>Search by name or let Omada rank compatible people.</p></div><div className="inline-form"><input className="candidate-search" placeholder="Search a person by name…" value={candidateQuery} onChange={e=>setCandidateQuery(e.target.value)}/><Button variant="soft" onClick={()=>void loadCandidates()}>Search</Button></div></div><div className="card-grid">{candidateData.map(c=><UserCard key={c.user.id} user={c.user} extra={<div className="candidate-footer"><span>Score {(c.overallScore*100).toFixed(0)}%</span><Button variant="soft" onClick={()=>void api.sendRequest(eventId,{type:'team_invite',team_id:teamId,recipient_id:c.user.id,message:`We think you could complement ${currentTeam.name}.`})}>Invite</Button></div>}/>)}</div></section>}</>;
+
+  return <><PageHeader eyebrow="Team workspace" title={currentTeam.name} description={currentTeam.projectIdea || currentTeam.description || undefined} action={<Link className="btn btn-soft" to={`/teams?event=${eventId}`}>Back to discovery</Link>}/>
+    {error&&<div className="alert alert-danger">{error}</div>}
+    <div className="two-col">
+      <section className="surface">
+        <div className="section-heading">
+          <div><h3>Members</h3><p>{currentTeam.current_size} active member{currentTeam.current_size===1?'':'s'}</p></div>
+          <div className="chip-row">
+            <Badge tone={currentTeam.status==='forming'?'warn':'good'}>{currentTeam.status}</Badge>
+            {currentTeam.status==='finalized'&&<Badge tone={currentTeam.recruiting?'accent':'neutral'}>{currentTeam.recruiting?'recruiting':'not recruiting'}</Badge>}
+          </div>
+        </div>
+        <div className="member-list">
+          {currentTeam.members.map(m=><div className="member-row" key={m.id}>
+            <Avatar user={m.user}/>
+            <div><strong>{m.user.displayName}</strong><small>{m.roleInTeam}{m.user.preferredRoles[0] ? ` · ${m.user.preferredRoles[0].roleDisplay}` : ''}</small></div>
+            <div className="chip-row">{m.user.skills.slice(0,2).map(s=><Badge key={s.skillName}>{s.skillDisplay}</Badge>)}</div>
+            {canManageMembers && m.userId!==user?.id && (currentMembership?.roleInTeam==='owner' || m.roleInTeam==='member') &&
+              <Button variant="danger" className="btn-sm" disabled={busy} onClick={()=>void removeMember(m.userId,m.user.displayName)}>Remove</Button>}
+          </div>)}
+        </div>
+      </section>
+
+      <section className="surface">
+        <h3>Team actions</h3>
+        <div className="action-grid">
+          {currentTeam.chatRoomId&&<Link className="btn btn-soft" to={`/chat/${currentTeam.chatRoomId}?team=${teamId}&event=${eventId}`}>Open chat</Link>}
+
+          {canSearchCandidates&&participation.data?.status==='looking_for_team'&&!currentTeam.members.some((m)=>m.userId===user?.id)&&
+            <Button disabled={busy} onClick={()=>void action(async()=>{await api.sendRequest(eventId,{type:'join_request',team_id:teamId,message:'I’d like to join your team.'}); await participation.reload();})}>Request to join</Button>}
+
+          {isOwner&&currentTeam.status==='forming'&&<>
+            <Button variant="soft" onClick={()=>void loadCandidates()}>Find candidates</Button>
+            <Button disabled={busy} onClick={()=>void action(()=>api.finalizeTeam(eventId,teamId))}>Finalize team</Button>
+            <Button variant="danger" disabled={busy} onClick={()=>void action(()=>api.dissolveTeam(eventId,teamId))}>Dissolve</Button>
+          </>}
+
+          {canRecruit&&<>
+            <Button disabled={busy} onClick={()=>void action(()=>api.setTeamRecruiting(eventId,teamId,!currentTeam.recruiting))}>
+              {currentTeam.recruiting?'Close recruitment':'Look for candidates'}
+            </Button>
+            {currentTeam.recruiting&&<Button variant="soft" onClick={()=>void loadCandidates()}>Find candidates</Button>}
+          </>}
+
+          {user?.id&&currentTeam.members.some(m=>m.userId===user.id)&&['forming','finalized'].includes(currentTeam.status)&&
+            <Button variant="ghost" disabled={busy} onClick={()=>void leaveCurrentTeam()}>Leave team</Button>}
+        </div>
+      </section>
+    </div>
+
+    {candidatesLoaded&&<section className="surface section-margin">
+      <div className="section-heading">
+        <div><h3>Candidate search</h3><p>Search by name or let Omada rank compatible people.</p></div>
+        <div className="inline-form">
+          <input className="candidate-search" placeholder="Search a person by name…" value={candidateQuery} onChange={e=>setCandidateQuery(e.target.value)}/>
+          <Button variant="soft" onClick={()=>void loadCandidates()}>Search</Button>
+        </div>
+      </div>
+      {candidateData.length===0
+        ? <p className="muted">No eligible candidates are currently available.</p>
+        : <div className="card-grid">{candidateData.map(c=><UserCard key={c.user.id} user={c.user} extra={<div className="candidate-footer"><span>Score {(c.overallScore*100).toFixed(0)}%</span><Button variant="soft" onClick={()=>void api.sendRequest(eventId,{type:'team_invite',team_id:teamId,recipient_id:c.user.id,message:`We think you could complement ${currentTeam.name}.`})}>Invite</Button></div>}/>)}</div>}
+    </section>}
+  </>;
 }
 
 export function ProvisionalPage() {
