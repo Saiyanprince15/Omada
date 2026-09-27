@@ -16,6 +16,7 @@ import notificationsRouter from './routes/notifications';
 import { prisma } from './lib/prisma';
 import { getRedis } from './lib/redis';
 import adminRouter from './routes/admin';
+import organizerRouter from './routes/organizer';
 
 import { errorHandler } from './middleware/errorHandler';
 import { notFound } from './middleware/notFound';
@@ -82,6 +83,7 @@ app.use('/v1/events', provisionalRouter);
 app.use('/v1/chat', chatRouter);
 app.use('/v1/notifications', notificationsRouter);
 app.use('/v1/admin', adminRouter);
+app.use('/v1/organizer', organizerRouter);
 
 // ─── Error handling ───────────────────────────────────────────────────────
 app.use(notFound);
