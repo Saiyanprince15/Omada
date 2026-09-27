@@ -8,7 +8,7 @@ import type {
   User,
 } from '../types';
 
-const API_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:3000/v1').replace(/\/$/, '');
+const API_URL = (import.meta.env.VITE_API_URL ?? '/v1').replace(/\/$/, '');
 
 let accessToken = localStorage.getItem('omada_access_token');
 let refreshToken = localStorage.getItem('omada_refresh_token');
