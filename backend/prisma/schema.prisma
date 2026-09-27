@@ -322,6 +322,7 @@ model Team {
   description  String?
   ownerId      String     @map("owner_id")
   status       TeamStatus @default(forming)
+  recruiting   Boolean    @default(false)
   projectIdea  String?    @map("project_idea")
   chatRoomId   String?    @map("chat_room_id")
   source       TeamSource @default(manual)
