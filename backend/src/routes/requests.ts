@@ -40,7 +40,9 @@ router.post(
         // User → Team: recipient is the team owner
         const team = await prisma.team.findUnique({ where: { id: body.team_id } });
         if (!team || team.eventId !== event_id) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
-        if (team.status !== 'forming') throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is not accepting requests.');
+        if (team.status !== 'forming' && !(team.status === 'finalized' && team.recruiting)) {
+          throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is not accepting requests.');
+        }
         recipientId = team.ownerId;
 
         // Sender must be available (not already in a team)
@@ -55,7 +57,9 @@ router.post(
 
         const team = await prisma.team.findUnique({ where: { id: body.team_id } });
         if (!team || team.eventId !== event_id) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
-        if (team.status !== 'forming') throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is not accepting new members.');
+        if (team.status !== 'forming' && !(team.status === 'finalized' && team.recruiting)) {
+          throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is not accepting new members.');
+        }
 
         const senderMembership = await prisma.teamMember.findUnique({
           where: { teamId_userId: { teamId: body.team_id, userId: senderId } },
@@ -235,7 +239,7 @@ router.put(
 
             const teamId = request.teamId!;
             const team = await tx.team.findUniqueOrThrow({ where: { id: teamId } });
-            if (team.status !== 'forming') {
+            if (team.status !== 'forming' && !(team.status === 'finalized' && team.recruiting)) {
               throw new AppError(409, 'TEAM_NOT_RECRUITING', 'This team is no longer recruiting.');
             }
 
@@ -257,7 +261,10 @@ router.put(
 
             await tx.eventParticipant.update({
               where: { eventId_userId: { eventId: event_id, userId: joiningUserId } },
-              data: { status: 'in_forming_team', teamId },
+              data: {
+                status: team.status === 'finalized' ? 'in_finalized_team' : 'in_forming_team',
+                teamId,
+              },
             });
 
             await tx.requestInvitation.update({
