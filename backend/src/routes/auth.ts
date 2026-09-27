@@ -40,7 +40,7 @@ router.post(
       const passwordHash = await bcrypt.hash(password, 12);
 
       const user = await prisma.user.create({
-        data: { email, passwordHash, displayName: display_name },
+        data: { email, passwordHash, displayName: display_name, isVerified: true },
       });
 
       const family = uuidv4();
