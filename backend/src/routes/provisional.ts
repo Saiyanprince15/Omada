@@ -312,6 +312,13 @@ router.post(
             const activeMembers = allMembers.filter((m) => ['pending', 'accepted'].includes(m.status));
             const allActiveAccepted = activeMembers.length > 0 && activeMembers.every((m) => m.status === 'accepted');
 
+            // Auto-match proposals must contain at least two distinct people.
+            // This is not a product-level team-size rule; it only prevents an
+            // invalid one-person proposal from becoming a forming team.
+            if (activeMembers.length < 2) {
+              throw new AppError(409, 'INVALID_MATCH_PROPOSAL', 'An auto-match proposal must contain at least two participants.');
+            }
+
             if (!allActiveAccepted) {
               return {
                 teamStatus: 'pending' as const,
