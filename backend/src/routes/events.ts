@@ -25,7 +25,12 @@ router.get('/', authenticate, async (req: Request, res: Response, next: NextFunc
         organizer: { select: { id: true, displayName: true } },
         requiredSkills: true,
         requiredRoles: true,
-        _count: { select: { participants: true, teams: true } },
+        _count: {
+          select: {
+            participants: true,
+            teams: { where: { status: { not: 'dissolved' } } },
+          },
+        },
       },
       take: take + 1,
       orderBy: { createdAt: 'desc' },
@@ -57,7 +62,12 @@ router.get('/:id', authenticate, async (req: Request, res: Response, next: NextF
         organizer: { select: { id: true, displayName: true } },
         requiredSkills: true,
         requiredRoles: true,
-        _count: { select: { participants: true, teams: true } },
+        _count: {
+          select: {
+            participants: true,
+            teams: { where: { status: { not: 'dissolved' } } },
+          },
+        },
       },
     });
 
