@@ -503,9 +503,9 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
     // Fix #2: cross-event auth
     const teamRecord = await requireTeamInEvent(team_id, event_id);
 
-    // Fix #12: Cannot leave a finalized team (members are locked in)
-    if (teamRecord.status === 'finalized' || teamRecord.status === 'locked') {
-      throw new AppError(409, 'CANNOT_LEAVE_FINALIZED', 'Cannot leave a finalized or locked team. Contact team owner.');
+    // Members may leave forming or finalized teams. Locked teams are immutable.
+    if (teamRecord.status === 'locked') {
+      throw new AppError(409, 'CANNOT_LEAVE_LOCKED', 'Cannot leave a locked team.');
     }
 
     const membership = await prisma.teamMember.findUnique({
@@ -547,10 +547,25 @@ router.post('/:event_id/teams/:team_id/leave', authenticate, async (req: Request
         data: { status: 'looking_for_team', teamId: null },
       });
 
+      await tx.requestInvitation.updateMany({
+        where: {
+          eventId: event_id,
+          OR: [{ senderId: userId }, { recipientId: userId }],
+          status: 'pending',
+        },
+        data: { status: 'cancelled' },
+      });
+
       const remainingMembers = currentTeam.members.filter((m) => m.userId !== userId && !m.leftAt);
 
       if (remainingMembers.length === 0) {
-        await tx.team.update({ where: { id: team_id }, data: { status: 'dissolved' } });
+        if (currentTeam.chatRoomId) {
+          await tx.chatRoom.update({
+            where: { id: currentTeam.chatRoomId },
+            data: { status: 'archived' },
+          });
+        }
+        await tx.team.update({ where: { id: team_id }, data: { status: 'dissolved', chatRoomId: null } });
       } else if (currentMembership.roleInTeam === 'owner') {
         // Auto-transfer ownership to longest-tenured member
         const newOwner = remainingMembers.sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime())[0]!;
@@ -632,8 +647,9 @@ router.delete(
       // Fix #2: cross-event auth
       const teamRecord = await requireTeamInEvent(team_id, event_id);
 
-      // Fix #12: block member removal on finalized teams
-      requireMutableTeam(teamRecord);
+      if (!['forming', 'finalized'].includes(teamRecord.status)) {
+        requireMutableTeam(teamRecord);
+      }
 
       const requesterMembership = await requireTeamMembership(team_id, requesterId, ['owner', 'admin']);
       const targetMembership = await prisma.teamMember.findUnique({
@@ -656,14 +672,39 @@ router.delete(
       if (!team) throw new AppError(404, 'NOT_FOUND', 'Team not found.');
 
       await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${team_id}))`;
+
+        const currentTeam = await tx.team.findUnique({
+          where: { id: team_id },
+          include: { members: { where: { leftAt: null } } },
+        });
+
+        if (!currentTeam || currentTeam.eventId !== event_id) {
+          throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+        }
+
+        const currentTarget = currentTeam.members.find((member) => member.userId === user_id);
+        if (!currentTarget) {
+          throw new AppError(404, 'NOT_FOUND', 'Target user is not an active team member.');
+        }
+
         await tx.teamMember.update({
           where: { teamId_userId: { teamId: team_id, userId: user_id } },
           data: { leftAt: new Date() },
         });
-        // User returns to looking_for_team when removed
+
         await tx.eventParticipant.update({
           where: { eventId_userId: { eventId: event_id, userId: user_id } },
           data: { status: 'looking_for_team', teamId: null },
+        });
+
+        await tx.requestInvitation.updateMany({
+          where: {
+            eventId: event_id,
+            OR: [{ senderId: user_id }, { recipientId: user_id }],
+            status: 'pending',
+          },
+          data: { status: 'cancelled' },
         });
       });
 
