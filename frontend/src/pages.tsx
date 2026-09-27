@@ -25,14 +25,50 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  useEffect(() => { if (user) navigate('/', { replace: true }); }, [user, navigate]);
+
+  useEffect(() => {
+    if (user) navigate('/', { replace: true });
+  }, [user, navigate]);
+
+  const passwordRequirements =
+    'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character.';
+
   async function submit(e: React.FormEvent) {
-    e.preventDefault(); setBusy(true); setError('');
-    try { signup ? await signUp(name, email, password) : await signIn(email, password); navigate('/', { replace: true }); }
-    catch (err) { setError(err instanceof Error ? err.message : 'Could not authenticate.'); }
-    finally { setBusy(false); }
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+
+    if (signup) {
+      const passwordValid =
+        password.length >= 8 &&
+        /[A-Z]/.test(password) &&
+        /[a-z]/.test(password) &&
+        /[0-9]/.test(password) &&
+        /[^A-Za-z0-9]/.test(password);
+
+      if (!passwordValid) {
+        setError(passwordRequirements);
+        setBusy(false);
+        return;
+      }
+    }
+
+    try {
+      if (signup) {
+        await signUp(name, email, password);
+      } else {
+        await signIn(email, password);
+      }
+      // Navigation is handled by the user state effect above. This avoids
+      // racing React Router navigation against the auth state update.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not authenticate.');
+    } finally {
+      setBusy(false);
+    }
   }
-  return <div className="auth-screen"><div className="auth-art"><div className="orb orb-a"/><div className="orb orb-b"/><div className="auth-brand">omada</div><div className="quote">The best teams are built around complementary people, not matching résumés.</div></div><form className="auth-card" onSubmit={submit}><div className="eyebrow">{signup ? 'Create account' : 'Welcome back'}</div><h1>{signup ? 'Build your profile.' : 'Find your people.'}</h1><p>{signup ? 'Start with the skills and roles you want to bring to a team.' : 'Sign in to continue building your next team.'}</p>{signup && <Field label="Display name" value={name} onChange={(e) => setName(e.target.value)} required /> }<Field label="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /><Field label="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={8} required />{error && <div className="alert alert-danger">{error}</div>}<Button type="submit" disabled={busy}>{busy ? 'Working…' : signup ? 'Create account' : 'Sign in'}</Button><button type="button" className="text-button" onClick={() => setSignup((v) => !v)}>{signup ? 'Already have an account? Sign in' : 'Need an account? Create one'}</button></form></div>;
+
+  return <div className="auth-screen"><div className="auth-art"><div className="orb orb-a"/><div className="orb orb-b"/><div className="auth-brand">omada</div><div className="quote">The best teams are built around complementary people, not matching résumés.</div></div><form className="auth-card" onSubmit={submit}><div className="eyebrow">{signup ? 'Create account' : 'Welcome back'}</div><h1>{signup ? 'Build your profile.' : 'Find your people.'}</h1><p>{signup ? 'Start with the skills and roles you want to bring to a team.' : 'Sign in to continue building your next team.'}</p>{signup && <Field label="Display name" value={name} onChange={(e) => setName(e.target.value)} required /> }<Field label="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /><Field label="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={8} required />{signup && <p className="field-hint">{passwordRequirements}</p>}{error && <div className="alert alert-danger">{error}</div>}<Button type="submit" disabled={busy}>{busy ? 'Working…' : signup ? 'Create account' : 'Sign in'}</Button><button type="button" className="text-button" onClick={() => setSignup((v) => !v)}>{signup ? 'Already have an account? Sign in' : 'Need an account? Create one'}</button></form></div>;
 }
 
 export function HomePage() {
