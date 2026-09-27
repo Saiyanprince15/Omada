@@ -2,8 +2,9 @@
  * TeamForge Matching Engine
  *
  * Implements skill/role/interest-based team formation with no fixed team-size constraints.
- * Team size is determined by the algorithm based on pool size and configured target group size.
- * Team completion is ALWAYS decided explicitly by the team via the finalize endpoint.
+ * Auto-match proposals require at least two distinct participants because a
+ * one-person proposal is not a match. Forming/finalized teams have no size cap
+ * and team completion is explicitly decided via the finalize endpoint.
  *
  * Two entry points:
  *   - runAutoMatch(eventId, roundId, weights?)  → creates provisional teams
@@ -597,7 +598,10 @@ export async function runAutoMatch(
       if (!best) break;
 
       const stillHasHard = missingHardSkills.length > 0 || missingHardRoles.length > 0;
-      if (!best.fillsHard && best.mc < MIN_MARGINAL_GAIN_TO_ADD) break;
+      const needsSecondParticipant = team.members.length < 2;
+      if (!best.fillsHard && best.mc < MIN_MARGINAL_GAIN_TO_ADD && !needsSecondParticipant && !stillHasHard) {
+        break;
+      }
 
       team.members.push(best.candidate);
       unassigned.delete(best.candidate.userId);
@@ -681,13 +685,17 @@ export async function runAutoMatch(
   // There is no minimum or maximum team size. If a tentative team cannot
   // satisfy the hard requirements, merge its members into valid teams because
   // adding members cannot remove an already-covered hard requirement.
-  let finalTeams = teams.filter((t) => satisfiesHardConstraints(t, constraints));
-  const invalidTeams = teams.filter((t) => !satisfiesHardConstraints(t, constraints));
+  let finalTeams = teams.filter(
+    (t) => t.members.length >= 2 && satisfiesHardConstraints(t, constraints)
+  );
+  const invalidTeams = teams.filter(
+    (t) => t.members.length < 2 || !satisfiesHardConstraints(t, constraints)
+  );
   const displacedMembers = invalidTeams.flatMap((t) => t.members);
 
   if (finalTeams.length === 0 && displacedMembers.length > 0) {
     const wholePool: TeamComposition = { members: pool };
-    if (satisfiesHardConstraints(wholePool, constraints)) {
+    if (wholePool.members.length >= 2 && satisfiesHardConstraints(wholePool, constraints)) {
       finalTeams = [wholePool];
       displacedMembers.length = 0;
     }
@@ -705,9 +713,9 @@ export async function runAutoMatch(
     target.members.push(member);
   }
 
-  // A candidate is unmatched only when no resulting team can satisfy the
-  // event's hard requirements. With no hard requirements, even a one-person
-  // provisional team is valid.
+  // A participant is unmatched when no valid multi-person provisional team can
+  // satisfy the event's hard requirements. Auto-match never produces a
+  // one-person proposal; those participants remain in discovery.
   const finalAssigned = new Set(finalTeams.flatMap((t) => t.members.map((m) => m.userId)));
   const unmatchedUserIds = pool
     .filter((u) => !finalAssigned.has(u.userId))
