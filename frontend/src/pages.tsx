@@ -342,3 +342,102 @@ export function ChatPage() {
 function Modal({title,onClose,children}:{title:string;onClose:()=>void;children:React.ReactNode}){return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal" onMouseDown={e=>e.stopPropagation()}><div className="section-heading"><h3>{title}</h3><button className="icon-button" onClick={onClose}>×</button></div>{children}</div></div>}
 function Loading(){return <div className="screen-center"><div className="spinner"/></div>}
 function ErrorBox({message}:{message:string}){return <div className="alert alert-danger">{message}</div>}
+
+
+export function OrganizerPage() {
+  const mine = useAsync(api.organizerEvents, []);
+  const [showCreate, setShowCreate] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [type, setType] = useState<'hackathon'|'academic_project'|'competition'|'research_project'|'other'>('hackathon');
+  const [starts, setStarts] = useState('');
+  const [ends, setEnds] = useState('');
+  const [registrationCloses, setRegistrationCloses] = useState('');
+  const [skills, setSkills] = useState('');
+  const [roles, setRoles] = useState('');
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      await api.createOrganizerEvent({
+        name,
+        description,
+        event_type: type,
+        event_starts: starts ? new Date(starts).toISOString() : undefined,
+        event_ends: ends ? new Date(ends).toISOString() : undefined,
+        registration_closes: registrationCloses ? new Date(registrationCloses).toISOString() : undefined,
+        matchmaking_enabled: true,
+        status: 'registration_open',
+        required_skills: skills.split(',').map((x) => x.trim()).filter(Boolean).map((skill_name) => ({ skill_name, constraint_type: 'soft' as const })),
+        required_roles: roles.split(',').map((x) => x.trim()).filter(Boolean).map((role_name) => ({ role_name, constraint_type: 'soft' as const })),
+      });
+      setShowCreate(false);
+      setName(''); setDescription(''); setStarts(''); setEnds(''); setRegistrationCloses(''); setSkills(''); setRoles('');
+      await mine.reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not create event.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeStatus(id: string, status: string) {
+    try {
+      await api.updateOrganizerEventStatus(id, status);
+      await mine.reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not update event.');
+    }
+  }
+
+  return <>
+    <PageHeader
+      eyebrow="Organizer"
+      title="Host an event"
+      description="Create and publish a hackathon, competition, academic project, or research event. There is no admin approval step."
+      action={<Button onClick={() => setShowCreate(true)}>Create event</Button>}
+    />
+    {error && <div className="alert alert-danger">{error}</div>}
+    <section className="surface">
+      <div className="section-heading">
+        <div><h3>Your events</h3><p>Events you host appear here and immediately become available in Explore events when published.</p></div>
+      </div>
+      {mine.loading ? <Loading /> : mine.error ? <ErrorBox message={mine.error} /> : (mine.data?.data ?? []).length === 0 ? (
+        <div className="empty-state"><strong>No events yet.</strong><p>Create your first hackathon or project event to get started.</p><Button onClick={() => setShowCreate(true)}>Create your first event</Button></div>
+      ) : (
+        <div className="card-grid">
+          {(mine.data?.data ?? []).map((event) => (
+            <article className="event-card" key={event.id}>
+              <Badge tone={event.status === 'registration_open' ? 'good' : event.status === 'draft' ? 'warn' : 'neutral'}>{event.status.replaceAll('_', ' ')}</Badge>
+              <h3>{event.name}</h3>
+              <p>{event.description || 'No description.'}</p>
+              <div className="event-footer"><span>{event.participant_count} participants</span><span>{event.team_count} teams</span></div>
+              <div className="action-row">
+                <Link className="btn btn-soft btn-sm" to={`/event/${event.id}`}>View event</Link>
+                {event.status === 'draft' && <Button variant="soft" onClick={() => void changeStatus(event.id, 'registration_open')}>Publish</Button>}
+                {event.status === 'registration_open' && <Button variant="ghost" onClick={() => void changeStatus(event.id, 'registration_closed')}>Close registration</Button>}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+    {showCreate && <Modal title="Create an event" onClose={() => setShowCreate(false)}>
+      <form className="form-stack" onSubmit={create}>
+        <Field label="Event name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Omada AI Hackathon" required />
+        <Textarea label="Description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What are participants building?" />
+        <label className="field"><span>Event type</span><select value={type} onChange={(e) => setType(e.target.value as typeof type)}><option value="hackathon">Hackathon</option><option value="competition">Competition</option><option value="academic_project">Academic project</option><option value="research_project">Research project</option><option value="other">Other</option></select></label>
+        <div className="two-col"><Field label="Registration closes" type="datetime-local" value={registrationCloses} onChange={(e) => setRegistrationCloses(e.target.value)} /><Field label="Event starts" type="datetime-local" value={starts} onChange={(e) => setStarts(e.target.value)} /></div>
+        <Field label="Event ends" type="datetime-local" value={ends} onChange={(e) => setEnds(e.target.value)} />
+        <Field label="Desired skills (comma separated)" value={skills} onChange={(e) => setSkills(e.target.value)} placeholder="Python, React, Figma" />
+        <Field label="Desired roles (comma separated)" value={roles} onChange={(e) => setRoles(e.target.value)} placeholder="Frontend Developer, Designer" />
+        <p className="muted">Team size is unrestricted. These skills and roles guide discovery and auto-matching; they do not impose team-size limits.</p>
+        <Button type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create and publish'}</Button>
+      </form>
+    </Modal>}
+  </>;
+}
