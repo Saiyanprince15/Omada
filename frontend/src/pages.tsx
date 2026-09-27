@@ -56,9 +56,67 @@ export function HomePage() {
 
 function Stat({ label, value }: { label: string; value: number }) { return <div className="stat-card"><span>{label}</span><strong>{value}</strong></div>; }
 
+const DEMO_EVENTS: Event[] = [
+  {
+    id: 'demo-ai-hackathon',
+    name: 'AI Innovation Hackathon',
+    description: 'Demo event — build an AI-powered product with a complementary team.',
+    eventType: 'hackathon',
+    status: 'registration_open',
+    matchmakingEnabled: true,
+    autoMatchTimeoutHrs: 48,
+    organizer: { id: 'demo', displayName: 'Omada Demo Organizer' },
+    requiredSkills: [{ skillName: 'python', constraintType: 'soft' }, { skillName: 'react', constraintType: 'soft' }],
+    requiredRoles: [{ roleName: 'frontend_developer', constraintType: 'soft' }, { roleName: 'ml_engineer', constraintType: 'soft' }],
+    participant_count: 128,
+    team_count: 24,
+    looking_count: 41,
+    registrationCloses: '2026-10-15T23:59:00.000Z',
+    eventStarts: '2026-10-20T09:00:00.000Z',
+    eventEnds: '2026-10-22T18:00:00.000Z',
+  },
+  {
+    id: 'demo-campus-project',
+    name: 'Campus Product Challenge',
+    description: 'Demo placeholder — form a team around a real student problem.',
+    eventType: 'competition',
+    status: 'registration_open',
+    matchmakingEnabled: true,
+    autoMatchTimeoutHrs: 48,
+    organizer: { id: 'demo', displayName: 'Omada Demo Organizer' },
+    requiredSkills: [{ skillName: 'design', constraintType: 'soft' }],
+    requiredRoles: [{ roleName: 'product_manager', constraintType: 'soft' }],
+    participant_count: 76,
+    team_count: 15,
+    looking_count: 19,
+  },
+];
+
 export function EventsPage() {
   const events = useAsync(api.listEvents, []);
-  return <><PageHeader eyebrow="Explore" title="Events" description="Pick a project, competition, or hackathon and start building your team."/><div className="card-grid">{events.loading ? <Loading /> : events.error ? <ErrorBox message={events.error}/> : events.data?.data.map((event) => <Link className="event-card" to={`/event/${event.id}`} key={event.id}><Badge tone={event.status === 'registration_open' ? 'good' : 'neutral'}>{event.status.replaceAll('_',' ')}</Badge><h3>{event.name}</h3><p>{event.description || 'No description available.'}</p><div className="event-footer"><span>{event.participant_count} participants</span><span>{event.team_count} teams</span></div></Link>)}</div></>;
+  const realEvents = events.data?.data ?? [];
+  const showingDemo = !events.loading && !events.error && realEvents.length === 0;
+  const displayed = showingDemo ? DEMO_EVENTS : realEvents;
+
+  return <>
+    <PageHeader eyebrow="Explore" title="Events" description="Pick a project, competition, or hackathon and start building your team."/>
+    {showingDemo && <div className="alert alert-info">Demo events are shown because no hosted events exist yet. Create a real event from <Link to="/organizer">Organizer</Link>.</div>}
+    <div className="card-grid">
+      {events.loading ? <Loading /> : events.error ? <ErrorBox message={events.error}/> : displayed.map((event) =>
+        showingDemo
+          ? <article className="event-card" key={event.id}>
+              <Badge tone="accent">demo / placeholder</Badge>
+              <h3>{event.name}</h3><p>{event.description}</p>
+              <div className="event-footer"><span>{event.participant_count} participants</span><span>{event.team_count} teams</span></div>
+            </article>
+          : <Link className="event-card" to={`/event/${event.id}`} key={event.id}>
+              <Badge tone={event.status === 'registration_open' ? 'good' : 'neutral'}>{event.status.replaceAll('_',' ')}</Badge>
+              <h3>{event.name}</h3><p>{event.description || 'No description available.'}</p>
+              <div className="event-footer"><span>{event.participant_count} participants</span><span>{event.team_count} teams</span></div>
+            </Link>
+      )}
+    </div>
+  </>;
 }
 
 export function EventPage() {
