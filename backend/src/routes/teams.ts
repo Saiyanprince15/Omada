@@ -163,7 +163,14 @@ router.get('/:event_id/teams', authenticate, async (req: Request, res: Response,
     const teams = await prisma.team.findMany({
       where: {
         eventId: event_id,
-        ...(status ? { status: status as never } : { status: { in: ['forming', 'finalized'] } }),
+        ...(status
+          ? { status: status as never }
+          : {
+              OR: [
+                { status: 'forming' },
+                { status: 'finalized', recruiting: true },
+              ],
+            }),
         ...(needs_skill
           ? { requirements: { some: { requirementType: 'skill', name: normalizeSkill(needs_skill) } } }
           : {}),
@@ -203,7 +210,13 @@ router.get('/:event_id/teams/discover', authenticate, async (req: Request, res: 
     const take = Math.min(parseInt(limit), 50);
 
     const openTeams = await prisma.team.findMany({
-      where: { eventId: event_id, status: 'forming' },
+      where: {
+        eventId: event_id,
+        OR: [
+          { status: 'forming' },
+          { status: 'finalized', recruiting: true },
+        ],
+      },
       include: { ...TEAM_PUBLIC_INCLUDE, requirements: true },
       take,
     });
