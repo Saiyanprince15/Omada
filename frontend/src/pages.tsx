@@ -63,18 +63,74 @@ export function EventsPage() {
 
 export function EventPage() {
   const { id = '' } = useParams();
+  const navigate = useNavigate();
   const event = useAsync(() => api.getEvent(id), [id]);
   const { refreshUser } = useAuth();
   const participation = useAsync(() => api.getParticipation(id), [id]);
   const [action, setAction] = useState('');
   const [error, setError] = useState('');
-  async function act(fn: () => Promise<unknown>) { setAction('working'); setError(''); try { await fn(); await refreshUser(); await Promise.all([event.reload(), participation.reload()]); } catch(e){setError(e instanceof Error ? e.message : 'Action failed.');} finally {setAction('');} }
+
+  async function act(fn: () => Promise<unknown>) {
+    setAction('working');
+    setError('');
+    try {
+      await fn();
+      await refreshUser();
+      await Promise.all([event.reload(), participation.reload()]);
+    } catch(e) {
+      setError(e instanceof Error ? e.message : 'Action failed.');
+    } finally {
+      setAction('');
+    }
+  }
+
+  // Auto-match runs asynchronously on the backend. Keep checking the event
+  // participation state while the user is queued so the UI reacts as soon as
+  // a provisional or permanent team is created.
+  useEffect(() => {
+    const status = participation.data?.status;
+    if (!id || !['in_matchmaking', 'in_provisional_team'].includes(status ?? '')) return;
+
+    let active = true;
+
+    const check = async () => {
+      try {
+        const latest = await api.getParticipation(id);
+        if (!active) return;
+
+        if (latest.status === 'in_provisional_team' && latest.provisional_team?.id) {
+          navigate(`/provisional/${id}/${latest.provisional_team.id}`, { replace: true });
+          return;
+        }
+
+        if (['in_forming_team', 'in_finalized_team'].includes(latest.status ?? '') && latest.team?.id) {
+          navigate(`/team/${id}/${latest.team.id}`, { replace: true });
+          return;
+        }
+
+        await participation.reload();
+      } catch {
+        // Transient polling errors should not interrupt matchmaking.
+      }
+    };
+
+    void check();
+    const timer = window.setInterval(() => { void check(); }, 2500);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [id, participation.data?.status, participation.data?.provisional_team?.id, navigate]);
+
   if (event.loading) return <Loading />;
   if (!event.data) return <ErrorBox message={event.error ?? 'Event not found.'}/>;
   const participantStatus = participation.data?.status;
+  const waitingForMatch = participantStatus === 'in_matchmaking';
+
   return <><PageHeader eyebrow={event.data.eventType.replaceAll('_',' ')} title={event.data.name} description={event.data.description || undefined} action={<Link className="btn btn-soft" to={`/teams?event=${id}`}>Discover teams</Link>}/>
     {error && <div className="alert alert-danger">{error}</div>}
-    <div className="two-col"><section className="surface"><div className="metric-row"><Stat label="Participants" value={event.data.participant_count}/><Stat label="Teams" value={event.data.team_count}/><Stat label="Looking" value={event.data.looking_count ?? 0}/></div><div className="section-block"><h3>Your status</h3><Badge tone={participantStatus ? 'accent' : 'neutral'}>{participantStatus ? participantStatus.replaceAll('_',' ') : 'Not registered'}</Badge><div className="action-row">{!participantStatus && event.data.status === 'registration_open' && <Button disabled={!!action} onClick={()=>void act(()=>api.registerForEvent(id))}>Register</Button>}{participantStatus === 'registered' && <Button disabled={!!action} onClick={()=>void act(()=>api.setParticipation(id,'looking_for_team'))}>I’m looking for a team</Button>}{participantStatus === 'looking_for_team' && event.data.matchmakingEnabled && <Button disabled={!!action} onClick={()=>void act(()=>api.enterMatchmaking(id))}>Join auto-match</Button>}{participantStatus === 'in_matchmaking' && <Button variant="ghost" disabled={!!action} onClick={()=>void act(()=>api.leaveMatchmaking(id))}>Leave auto-match</Button>}{['in_forming_team','in_finalized_team'].includes(participantStatus ?? '') && participation.data?.team?.id && <Link className="btn btn-primary" to={`/team/${id}/${participation.data.team.id}`}>Open your team</Link>}</div></div></section><section className="surface"><h3>Event focus</h3><div className="chip-column">{event.data.requiredSkills.map((r)=><div className="requirement-row" key={r.skillName}><Badge tone={r.constraintType==='hard'?'danger':'neutral'}>{r.constraintType}</Badge><span>{r.skillName}</span></div>)}{event.data.requiredRoles.map((r)=><div className="requirement-row" key={r.roleName}><Badge tone={r.constraintType==='hard'?'danger':'neutral'}>{r.constraintType}</Badge><span>{r.roleName}</span></div>)}</div></section></div></>;
+    <div className="two-col"><section className="surface"><div className="metric-row"><Stat label="Participants" value={event.data.participant_count}/><Stat label="Teams" value={event.data.team_count}/><Stat label="Looking" value={event.data.looking_count ?? 0}/></div><div className="section-block"><h3>Your status</h3><Badge tone={participantStatus ? 'accent' : 'neutral'}>{participantStatus ? participantStatus.replaceAll('_',' ') : 'Not registered'}</Badge><div className="action-row">{!participantStatus && event.data.status === 'registration_open' && <Button disabled={!!action} onClick={()=>void act(()=>api.registerForEvent(id))}>Register</Button>}{participantStatus === 'registered' && <Button disabled={!!action} onClick={()=>void act(()=>api.setParticipation(id,'looking_for_team'))}>I’m looking for a team</Button>}{participantStatus === 'looking_for_team' && event.data.matchmakingEnabled && <Button disabled={!!action} onClick={()=>void act(()=>api.enterMatchmaking(id))}>Join auto-match</Button>}{waitingForMatch && <div className="stack"><p className="muted">Waiting for another participant to join auto-match. Omada will automatically check for a compatible proposal.</p><Button variant="ghost" disabled={!!action} onClick={()=>void act(()=>api.leaveMatchmaking(id))}>Leave auto-match</Button></div>}{['in_forming_team','in_finalized_team'].includes(participantStatus ?? '') && participation.data?.team?.id && <Link className="btn btn-primary" to={`/team/${id}/${participation.data.team.id}`}>Open your team</Link>}</div></div></section><section className="surface"><h3>Event focus</h3><div className="chip-column">{event.data.requiredSkills.map((r)=><div className="requirement-row" key={r.skillName}><Badge tone={r.constraintType==='hard'?'danger':'neutral'}>{r.constraintType}</Badge><span>{r.skillName}</span></div>)}{event.data.requiredRoles.map((r)=><div className="requirement-row" key={r.roleName}><Badge tone={r.constraintType==='hard'?'danger':'neutral'}>{r.constraintType}</Badge><span>{r.roleName}</span></div>)}</div></section></div></>;
 }
 
 export function TeamsPage() {
