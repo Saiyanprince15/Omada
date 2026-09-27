@@ -28,7 +28,7 @@ export function Textarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement
   return <label className="field">{label && <span>{label}</span>}<textarea {...input} /></label>;
 }
 
-export function Shell({ children }: { children: ReactNode }) {
+export function Shell() {
   const { user, signOut } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
