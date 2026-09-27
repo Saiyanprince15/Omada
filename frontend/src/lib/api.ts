@@ -141,7 +141,7 @@ export async function listTeams(eventId: string, mode = 'explore') {
     );
   }
   return rawRequest<{ data: Team[]; pagination?: { next_cursor: string | null; has_more: boolean } }>(
-    `/events/${eventId}/teams?limit=50&status=forming`,
+    `/events/${eventId}/teams?limit=50`,
   );
 }
 
@@ -169,6 +169,13 @@ export async function updateTeam(eventId: string, teamId: string, body: Partial<
 
 export async function finalizeTeam(eventId: string, teamId: string) {
   return rawRequest<{ team: Team }>(`/events/${eventId}/teams/${teamId}/finalize`, { method: 'POST' });
+}
+
+export async function setTeamRecruiting(eventId: string, teamId: string, open: boolean) {
+  return rawRequest<{ team: Team }>(`/events/${eventId}/teams/${teamId}/recruiting`, {
+    method: 'POST',
+    body: JSON.stringify({ open }),
+  });
 }
 
 export async function leaveTeam(eventId: string, teamId: string) {
