@@ -267,3 +267,31 @@ export async function messages(roomId: string) {
 export async function postMessage(roomId: string, content: string) {
   return rawRequest<{ message: ChatMessage }>(`/chat/rooms/${roomId}/messages`, { method: 'POST', body: JSON.stringify({ content }) });
 }
+
+
+export async function organizerEvents() {
+  return rawRequest<{ data: Event[] }>('/organizer/events');
+}
+
+export async function createOrganizerEvent(body: {
+  name: string;
+  description?: string;
+  event_type: 'hackathon' | 'academic_project' | 'competition' | 'research_project' | 'other';
+  registration_opens?: string;
+  registration_closes?: string;
+  event_starts?: string;
+  event_ends?: string;
+  matchmaking_enabled?: boolean;
+  status?: 'draft' | 'registration_open';
+  required_skills?: Array<{ skill_name: string; constraint_type: 'hard' | 'soft' }>;
+  required_roles?: Array<{ role_name: string; constraint_type: 'hard' | 'soft' }>;
+}) {
+  return rawRequest<Event>('/organizer/events', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function updateOrganizerEventStatus(eventId: string, status: string) {
+  return rawRequest<{ event: Event }>(`/organizer/events/${eventId}/status`, {
+    method: 'PUT',
+    body: JSON.stringify({ status }),
+  });
+}
