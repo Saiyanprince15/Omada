@@ -85,6 +85,7 @@ export const createEventSchema = z.object({
     event_starts: z.string().datetime().optional(),
     event_ends: z.string().datetime().optional(),
     matchmaking_enabled: z.boolean().default(true),
+    status: z.enum(['draft', 'registration_open']).default('registration_open'),
     required_skills: z
       .array(
         z.object({
