@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './lib/auth';
 import type { Event, Team, User } from './types';
 
@@ -46,13 +46,14 @@ export function Shell({ children }: { children: ReactNode }) {
           <NavLink to="/requests" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>Requests</NavLink>
           <NavLink to="/notifications" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>Notifications</NavLink>
           <NavLink to="/profile" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>Profile</NavLink>
+          <NavLink to="/organizer" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>Organizer</NavLink>
         </nav>
         <div className="sidebar-bottom">
           <button className="profile-mini" onClick={() => navigate('/profile')}><Avatar user={user!} size={36}/><span><strong>{user?.displayName}</strong><small>View profile</small></span></button>
           <button className="nav-link nav-link-button" onClick={() => void signOut()}>Sign out</button>
         </div>
       </aside>
-      <main className="main-area">{children}</main>
+      <main className="main-area"><Outlet /></main>
     </div>
   );
 }
