@@ -29,6 +29,9 @@ RUN apt-get update \
 
 COPY package*.json ./
 RUN npm ci --omit=dev
+# Include Prisma CLI so production migrations can be applied from the container.
+RUN npm install --no-save prisma@5.22.0
+COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/node_modules/@prisma ./node_modules/@prisma
