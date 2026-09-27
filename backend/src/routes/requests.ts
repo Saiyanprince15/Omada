@@ -212,6 +212,11 @@ router.put(
       }
 
       // action === 'accept'
+      // The person entering the team depends on request direction:
+      // - join_request: the sender asked to join, so the sender enters.
+      // - team_invite/personal_invite: the recipient was invited, so the recipient enters.
+      const joiningUserId = request.type === 'join_request' ? request.senderId : request.recipientId;
+
       // Serialize competing accepts for the same participant. A user may only
       // transition into one forming team, even when multiple invitations are
       // accepted concurrently from different requests/tabs.
@@ -220,12 +225,12 @@ router.put(
         try {
           result = await prisma.$transaction(async (tx) => {
             const participant = await tx.eventParticipant.findUniqueOrThrow({
-              where: { eventId_userId: { eventId: event_id, userId } },
+              where: { eventId_userId: { eventId: event_id, userId: joiningUserId } },
             });
 
             const unavailableStates = ['in_forming_team', 'in_finalized_team', 'in_provisional_team', 'in_matchmaking'];
             if (unavailableStates.includes(participant.status)) {
-              throw new AppError(409, 'ALREADY_IN_TEAM', 'You are already in a team or matchmaking process.');
+              throw new AppError(409, 'ALREADY_IN_TEAM', 'This user is already in a team or matchmaking process.');
             }
 
             const teamId = request.teamId!;
@@ -235,23 +240,23 @@ router.put(
             }
 
             const existingMembership = await tx.teamMember.findUnique({
-              where: { teamId_userId: { teamId, userId } },
+              where: { teamId_userId: { teamId, userId: joiningUserId } },
             });
             if (existingMembership && !existingMembership.leftAt) {
-              throw new AppError(409, 'ALREADY_MEMBER', 'You are already a member of this team.');
+              throw new AppError(409, 'ALREADY_MEMBER', 'This user is already a member of this team.');
             }
 
             if (existingMembership) {
               await tx.teamMember.update({
-                where: { teamId_userId: { teamId, userId } },
+                where: { teamId_userId: { teamId, userId: joiningUserId } },
                 data: { leftAt: null, roleInTeam: 'member' },
               });
             } else {
-              await tx.teamMember.create({ data: { teamId, userId, roleInTeam: 'member' } });
+              await tx.teamMember.create({ data: { teamId, userId: joiningUserId, roleInTeam: 'member' } });
             }
 
             await tx.eventParticipant.update({
-              where: { eventId_userId: { eventId: event_id, userId } },
+              where: { eventId_userId: { eventId: event_id, userId: joiningUserId } },
               data: { status: 'in_forming_team', teamId },
             });
 
@@ -264,7 +269,7 @@ router.put(
               where: {
                 eventId: event_id,
                 id: { not: request_id },
-                OR: [{ recipientId: userId }, { senderId: userId }],
+                OR: [{ recipientId: joiningUserId }, { senderId: joiningUserId }],
                 status: 'pending',
               },
               data: { status: 'cancelled' },
