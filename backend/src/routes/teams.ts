@@ -276,7 +276,7 @@ router.get('/:event_id/teams/discover', authenticate, async (req: Request, res: 
 // ─── GET /v1/events/:event_id/teams/:team_id ──────────────────────────────
 router.get('/:event_id/teams/:team_id', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const team = await prisma.team.findUnique({
+    let team = await prisma.team.findUnique({
       where: { id: req.params.team_id },
       include: TEAM_PUBLIC_INCLUDE,
     });
@@ -284,6 +284,24 @@ router.get('/:event_id/teams/:team_id', authenticate, async (req: Request, res: 
     // Fix #2: cross-event auth check
     if (!team || team.eventId !== req.params.event_id) {
       throw new AppError(404, 'NOT_FOUND', 'Team not found.');
+    }
+
+    // Self-heal legacy auto-match teams created before the forming-stage
+    // provisional chat was retained. New conversions already carry the chat.
+    if (team.status === 'forming' && team.source === 'auto_match' && !team.chatRoomId) {
+      const repaired = await prisma.$transaction(async (tx) => {
+        const chatRoom = await tx.chatRoom.create({
+          data: { roomType: 'provisional', status: 'active' },
+        });
+
+        return tx.team.update({
+          where: { id: team!.id },
+          data: { chatRoomId: chatRoom.id },
+          include: TEAM_PUBLIC_INCLUDE,
+        });
+      });
+
+      team = repaired;
     }
 
     const activeMembers = team.members.filter((m) => !m.leftAt);
