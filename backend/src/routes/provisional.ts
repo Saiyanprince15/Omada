@@ -362,6 +362,11 @@ router.post(
               });
             }
 
+            await tx.provisionalTeam.update({
+              where: { id: pt_id },
+              data: { finalizedTeamId: team.id },
+            });
+
             return { teamStatus: 'converted' as const, teamId: team.id, awaitingCount: 0 };
           }, {
             isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
