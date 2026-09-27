@@ -175,6 +175,10 @@ export async function leaveTeam(eventId: string, teamId: string) {
   return rawRequest(`/events/${eventId}/teams/${teamId}/leave`, { method: 'POST' });
 }
 
+export async function removeTeamMember(eventId: string, teamId: string, userId: string) {
+  return rawRequest(`/events/${eventId}/teams/${teamId}/members/${userId}`, { method: 'DELETE' });
+}
+
 export async function dissolveTeam(eventId: string, teamId: string) {
   return rawRequest(`/events/${eventId}/teams/${teamId}/dissolve`, { method: 'POST' });
 }
