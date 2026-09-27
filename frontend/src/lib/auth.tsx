@@ -63,7 +63,6 @@ export function RequireAuth({ children }: { children: ReactNode }) {
 }
 
 function NavigateToLogin() {
-  window.history.replaceState({}, '', '/login');
-  window.dispatchEvent(new PopStateEvent('popstate'));
+  window.location.replace('/login');
   return null;
 }
